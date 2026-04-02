@@ -1,0 +1,11 @@
+{
+  "name": "email-marketing-system",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "backend": "yarn workspace backend dev",
+    "frontend": "yarn workspace frontend dev"
+  }
+}
