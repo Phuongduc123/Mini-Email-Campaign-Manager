@@ -1,0 +1,31 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main, master]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          max_turns: 5
+          prompt: |
+            You are a senior backend engineer reviewing a Pull Request for a Mini Campaign Manager (email marketing system).
+
+            Please review this PR and post your findings as inline review comments. Focus on:
+
+            1. **Business logic correctness** — campaign status transitions (draft → scheduled → sending → sent), guard rules, async send handling
+            2. **Security** — SQL injection, JWT handling, input validation, sensitive data in logs
+            3. **Performance** — N+1 queries, missing indexes, unoptimized DB calls
+            4. **Error handling** — unhandled promises, missing try/catch, improper HTTP status codes
+            5. **Code quality** — separation of concerns (controller/service/repository), naming clarity
+
+            Be concise. Only comment on actual issues — do not praise correct code.
+            If the PR looks good overall, leave a brief summary saying so.
