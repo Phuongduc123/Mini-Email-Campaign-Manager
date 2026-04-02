@@ -1,0 +1,621 @@
+# Architecture Design — Mini Campaign Manager
+
+Designed to be simple, production-minded, and incrementally scalable. Avoids over-engineering while making the right structural choices upfront.
+
+---
+
+## Table of Contents
+
+1. [High-Level Overview](#1-high-level-overview)
+2. [Backend Architecture](#2-backend-architecture)
+3. [Frontend Architecture](#3-frontend-architecture)
+4. [API Design Principles](#4-api-design-principles)
+5. [Async Sending Design](#5-async-sending-design)
+6. [Logging & Observability](#6-logging--observability)
+7. [Scalability Considerations](#7-scalability-considerations)
+8. [Trade-offs](#8-trade-offs)
+
+---
+
+## 1. High-Level Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          Browser                                │
+│                     React 18 + TypeScript                       │
+│        React Query (data fetching) + Zustand (local state)      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ HTTPS / REST JSON
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     Express API Server                          │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────┐               │
+│  │  Routes  │→ │  Middleware  │→ │  Services  │               │
+│  │          │  │  auth, zod   │  │  business  │               │
+│  └──────────┘  └──────────────┘  └─────┬──────┘               │
+│                                         │                       │
+│                                  ┌──────▼──────┐               │
+│                                  │ Repositories│               │
+│                                  │ (DB access) │               │
+│                                  └──────┬──────┘               │
+└─────────────────────────────────────────┼───────────────────────┘
+                                          │
+                           ┌──────────────▼──────────────┐
+                           │        PostgreSQL            │
+                           │  (Sequelize ORM + migrations)│
+                           └─────────────────────────────┘
+```
+
+**Request lifecycle:**
+```
+HTTP Request
+  → Rate Limiter (express-rate-limit)
+  → Request ID injection (middleware)
+  → JWT verification (auth middleware)
+  → Schema validation (Zod)
+  → Controller (thin, delegates to service)
+  → Service (business logic + logging)
+  → Repository (DB queries)
+  → Response
+```
+
+---
+
+## 2. Backend Architecture
+
+### 2.1 Folder Structure
+
+```
+packages/backend/src/
+│
+├── app.ts                    # Express app setup, middleware registration
+├── server.ts                 # HTTP server entry point
+│
+├── config/
+│   ├── database.ts           # Sequelize connection config
+│   ├── env.ts                # Validated env vars (zod schema for process.env)
+│   └── logger.ts             # Logger instance (pino)
+│
+├── database/
+│   ├── models/               # Sequelize model definitions
+│   │   ├── User.ts
+│   │   ├── Campaign.ts
+│   │   ├── Recipient.ts
+│   │   └── CampaignRecipient.ts
+│   ├── migrations/           # Sequelize migration files
+│   └── seeders/              # Demo/dev seed data
+│
+├── modules/                  # Feature-based organization
+│   ├── auth/
+│   │   ├── auth.routes.ts
+│   │   ├── auth.controller.ts
+│   │   ├── auth.service.ts
+│   │   └── auth.schema.ts    # Zod schemas for this module
+│   │
+│   ├── campaigns/
+│   │   ├── campaigns.routes.ts
+│   │   ├── campaigns.controller.ts
+│   │   ├── campaigns.service.ts
+│   │   ├── campaigns.repository.ts
+│   │   ├── campaigns.schema.ts
+│   │   └── send.service.ts   # Async send simulation
+│   │
+│   └── recipients/
+│       ├── recipients.routes.ts
+│       ├── recipients.controller.ts
+│       ├── recipients.service.ts
+│       ├── recipients.repository.ts
+│       └── recipients.schema.ts
+│
+├── middleware/
+│   ├── authenticate.ts       # JWT verification → attaches req.user
+│   ├── validate.ts           # Zod validation factory middleware
+│   ├── requestId.ts          # Injects x-request-id into req + res headers
+│   ├── rateLimiter.ts        # express-rate-limit config
+│   └── errorHandler.ts       # Global error handler (last middleware)
+│
+├── shared/
+│   ├── errors/
+│   │   ├── AppError.ts       # Base error class
+│   │   └── errors.ts         # Named error constants
+│   ├── types/
+│   │   └── express.d.ts      # Augmented Request type (req.user, req.requestId)
+│   └── utils/
+│       └── pagination.ts     # Offset pagination helpers
+│
+└── tests/
+    ├── integration/
+    │   ├── campaigns.test.ts
+    │   └── auth.test.ts
+    └── unit/
+        └── stats.test.ts
+```
+
+---
+
+### 2.2 Layer Responsibilities
+
+| Layer | File pattern | Responsibility | What it must NOT do |
+|---|---|---|---|
+| **Route** | `*.routes.ts` | Register HTTP verb + path + middleware chain | Business logic |
+| **Controller** | `*.controller.ts` | Parse req, call service, serialize res | DB access, business rules |
+| **Service** | `*.service.ts` | Business logic, orchestration, logging | Direct DB queries |
+| **Repository** | `*.repository.ts` | All DB queries (Sequelize calls) | Business logic |
+| **Schema** | `*.schema.ts` | Zod input validation shapes | Nothing else |
+| **Middleware** | `middleware/` | Cross-cutting: auth, validation, logging | Feature logic |
+
+**Why feature-based over layer-based?**
+
+Layer-based (`routes/`, `services/`, `controllers/` at root) forces you to jump across the tree for every change. Feature-based keeps everything for `campaigns` together — easier to navigate, easier to delete a feature.
+
+---
+
+### 2.3 Business Logic Rules (enforced in Service layer)
+
+```
+campaign.service.ts owns:
+  - Status transition guard: only draft can be edited/deleted
+  - Schedule validation: scheduled_at must be a future timestamp
+  - Send trigger: set status → 'sending', delegate to send.service.ts
+  - Stats computation: open_rate, send_rate (divide-by-zero safe)
+
+send.service.ts owns:
+  - Async send simulation loop
+  - Batch update of campaign_recipients status
+  - Final status update to 'sent'
+  - Skip unsubscribed recipients
+```
+
+---
+
+### 2.4 Validation & Error Handling
+
+**Validation — Zod at the boundary:**
+
+```
+Request Body → Zod schema parse → typed object OR throw ZodError
+              ↑
+  validate.ts middleware catches ZodError → 422 response
+```
+
+Validation happens once in middleware before the controller is called. Services receive already-typed, already-validated data.
+
+**Error handling — AppError class + global handler:**
+
+```typescript
+// shared/errors/AppError.ts
+class AppError extends Error {
+  constructor(
+    public code: string,        // "CAMPAIGN_NOT_DRAFT"
+    public message: string,
+    public statusCode: number
+  ) {}
+}
+
+// Usage in service:
+if (campaign.status !== 'draft') {
+  throw new AppError('CAMPAIGN_NOT_DRAFT', 'Campaign cannot be edited after scheduling.', 409);
+}
+```
+
+```
+Any thrown error (AppError or unexpected)
+  → bubbles up through controller
+  → caught by errorHandler.ts (last middleware)
+  → AppError     → structured JSON response
+  → Unknown Error → log full stack trace, return generic 500
+```
+
+**Error response shape:**
+
+```json
+{
+  "error": "CAMPAIGN_NOT_DRAFT",
+  "message": "Campaign cannot be edited after it has been scheduled or sent.",
+  "statusCode": 409,
+  "requestId": "req_abc123"
+}
+```
+
+---
+
+### 2.5 Database Access Patterns
+
+- All DB access goes through the **Repository layer only** — services never import Sequelize models directly
+- Repositories return plain objects using `.get({ plain: true })` — keeps services decoupled from ORM internals
+- Stats query uses index-covered `(campaign_id, status)` — see DATABASE.md §3
+- Batch send updates use `UPDATE ... WHERE id IN (...)` — never N+1 individual updates
+
+---
+
+## 3. Frontend Architecture
+
+### 3.1 Folder Structure
+
+```
+packages/frontend/src/
+│
+├── main.tsx                  # App entry point
+├── App.tsx                   # Router setup, auth guard
+│
+├── api/                      # Pure API call functions (no React)
+│   ├── client.ts             # Axios instance, baseURL, auth header injection
+│   ├── auth.api.ts
+│   ├── campaigns.api.ts
+│   └── recipients.api.ts
+│
+├── hooks/                    # React Query hooks — data fetching + mutations
+│   ├── useCampaigns.ts       # useQuery: list campaigns
+│   ├── useCampaign.ts        # useQuery: single campaign
+│   ├── useCampaignStats.ts   # useQuery: stats (auto-refetch while sending)
+│   ├── useCreateCampaign.ts  # useMutation
+│   ├── useSendCampaign.ts    # useMutation
+│   └── useRecipients.ts      # useQuery: recipient list
+│
+├── store/                    # Zustand — LOCAL UI state only
+│   └── auth.store.ts         # { user, token, login(), logout() }
+│
+├── pages/                    # Route-level components (one per route)
+│   ├── Login/
+│   │   └── LoginPage.tsx
+│   ├── Campaigns/
+│   │   └── CampaignsPage.tsx
+│   ├── NewCampaign/
+│   │   └── NewCampaignPage.tsx
+│   └── CampaignDetail/
+│       └── CampaignDetailPage.tsx
+│
+├── components/               # Reusable, stateless UI components
+│   ├── StatusBadge.tsx       # Color-coded campaign status
+│   ├── StatsBar.tsx          # Progress bar for open_rate / send_rate
+│   ├── RecipientTable.tsx    # Recipient list with status columns
+│   ├── CampaignForm.tsx      # Shared form for create
+│   ├── ErrorMessage.tsx      # Inline API error display
+│   └── LoadingSkeleton.tsx   # Skeleton placeholders
+│
+└── types/                    # Shared TypeScript types
+    ├── campaign.ts
+    ├── recipient.ts
+    └── api.ts                # ApiResponse<T>, ApiError shapes
+```
+
+---
+
+### 3.2 Separation of Concerns
+
+```
+pages/         ← "what this route does" — composes hooks + components
+hooks/         ← "how to get/mutate data" — React Query wrappers
+api/           ← "how to talk to the backend" — pure async functions
+store/         ← "persistent UI state not owned by a query" — auth only
+components/    ← "how to render a concept" — receives props, no data fetching
+```
+
+**Rule:** Components never call `api/` directly. They receive data as props or call callbacks. Only hooks import from `api/`.
+
+---
+
+### 3.3 State Management Strategy
+
+| State type | Where it lives | Why |
+|---|---|---|
+| Server data (campaigns, recipients, stats) | **React Query** | Caching, background refetch, stale-while-revalidate built in |
+| Auth (user, token) | **Zustand** | Persists across navigations, not tied to a specific query |
+| Form state | **React Hook Form** (local) | Local to form component lifetime |
+| Loading / error per request | **React Query** | `isLoading`, `isError`, `error` — no extra code needed |
+| UI state (modal open, tab selection) | **useState** (local) | No need to hoist ephemeral state |
+
+**Zustand is used minimally** — only for auth. Everything else is React Query or local state. This avoids the "Zustand for everything" anti-pattern that re-creates the stale-data problem React Query already solves.
+
+---
+
+### 3.4 Loading & Error States
+
+```
+Every page/component that fetches data follows this pattern:
+
+  if (isLoading) → <LoadingSkeleton />
+  if (isError)   → <ErrorMessage error={error} />
+  else           → render data
+```
+
+- Stats on `/campaigns/:id` use **polling** (`refetchInterval: 2000`) while `campaign.status === 'sending'`, then polling stops automatically
+- Mutations (send, schedule, delete) show inline feedback via toast or status text
+- 401 responses in `client.ts` Axios interceptor → clear Zustand auth → redirect to `/login`
+
+---
+
+## 4. API Design Principles
+
+### 4.1 Endpoint Structure
+
+- Resources are plural nouns: `/campaigns`, `/recipients`
+- Non-CRUD actions use sub-resource paths: `/campaigns/:id/send`, `/campaigns/:id/schedule`
+- No verbs in base resource paths
+
+### 4.2 HTTP Status Codes
+
+| Scenario | Code |
+|---|---|
+| Successful read | 200 |
+| Resource created | 201 |
+| Async task accepted | 202 |
+| Validation error (Zod) | 422 |
+| Business rule violation (edit non-draft) | 409 |
+| Unauthenticated | 401 |
+| Resource not found | 404 |
+| Unhandled server error | 500 |
+
+### 4.3 Pagination
+
+```
+GET /campaigns?page=1&limit=20&status=sent
+
+Response:
+{
+  "data": [...],
+  "meta": {
+    "total": 134,
+    "page": 1,
+    "limit": 20,
+    "totalPages": 7
+  }
+}
+```
+
+> Offset pagination is used now for simplicity. Cursor-based pagination is the documented upgrade path in SCALABLE.md.
+
+### 4.4 Consistent Response Wrapper
+
+Success:
+```json
+{
+  "data": { ... },
+  "meta": { ... }
+}
+```
+
+Error:
+```json
+{
+  "error": "VALIDATION_ERROR",
+  "message": "scheduled_at must be a future timestamp.",
+  "statusCode": 422,
+  "requestId": "req_abc123",
+  "details": [{ "field": "scheduled_at", "issue": "Must be in the future" }]
+}
+```
+
+---
+
+## 5. Async Sending Design
+
+### 5.1 Current Implementation (Simple, Sufficient for This Challenge)
+
+```
+POST /campaigns/:id/send
+  │
+  ├─ [sync]  Validate campaign is sendable (status: draft | scheduled)
+  ├─ [sync]  Set campaign.status = 'sending'
+  ├─ [sync]  Return 202 Accepted immediately  ← client does not wait
+  │
+  └─ [async, detached]  send.service.ts
+        ├─ Fetch pending CampaignRecipients in batches of 200
+        ├─ For each batch:
+        │   ├─ Simulate send: random sent/failed (80/20 split)
+        │   ├─ Batch UPDATE campaign_recipients SET status, sent_at
+        │   └─ Increment campaign.sent_count / failed_count atomically
+        └─ When all batches done: SET campaign.status = 'sent'
+```
+
+**Why 202 Accepted?**
+The send is async — returning 200 would imply the work is done. The client polls `GET /campaigns/:id/stats` to observe progress.
+
+**Why fire-and-forget instead of awaiting?**
+Holding the HTTP connection open for a 10,000-recipient send would time out the request. Detached async + polling is the correct pattern here.
+
+### 5.2 Partial Failure Handling
+
+```
+Individual recipient failure:
+  → status = 'failed', error_message recorded
+  → does NOT stop the batch loop
+  → campaign.failed_count incremented atomically
+
+Process crash mid-send:
+  → campaign.status remains 'sending'
+  → Recovery: find campaigns stuck in 'sending' for > N minutes → re-trigger from last pending row
+
+Final result: campaign ends with a mix of sent + failed rows.
+Final status is always 'sent' — meaning "processing complete", not "all succeeded".
+```
+
+### 5.3 Future Upgrade Path
+
+```
+Current:   Detached async loop in same Node.js process
+↓
+Phase 2:   BullMQ job queue + separate worker process
+           POST /send → enqueue job → return 202
+           Worker crash → BullMQ auto-retries from checkpoint
+↓
+Phase 3:   Multiple worker replicas, sharded by campaign_id
+```
+
+`send.service.ts` is a pure function — wrapping it inside a BullMQ worker requires zero refactoring of the service itself.
+
+---
+
+## 6. Logging & Observability
+
+### 6.1 Logger Setup
+
+Use **pino** configured in `config/logger.ts`:
+
+```
+Development:  pino-pretty  (human-readable, colorized)
+Production:   JSON lines   (structured, machine-parseable, ships to Loki/Datadog)
+```
+
+### 6.2 Request ID (Correlation ID)
+
+Every request gets a unique ID from `requestId.ts` middleware:
+
+```
+Request arrives
+  → req.requestId = uuid()  (or read x-request-id from upstream proxy)
+  → res.setHeader('x-request-id', req.requestId)
+  → All log lines for this request include requestId
+```
+
+This allows tracing a complete request flow across all log lines — from route through service through repository.
+
+### 6.3 What Gets Logged (and Where)
+
+| Event | Level | Layer | Fields |
+|---|---|---|---|
+| Request received | `info` | middleware | method, path, requestId, userId |
+| Request completed | `info` | middleware | statusCode, durationMs, requestId |
+| Login success | `info` | auth.service | userId, requestId |
+| Login failure | `warn` | auth.service | reason, requestId (NOT the email) |
+| Campaign created | `info` | campaigns.service | campaignId, userId, requestId |
+| Campaign status change | `info` | campaigns.service | campaignId, oldStatus, newStatus |
+| Send started | `info` | send.service | campaignId, totalRecipients |
+| Batch processed | `debug` | send.service | campaignId, batchSize, sentCount, failedCount |
+| Send completed | `info` | send.service | campaignId, totalSent, totalFailed, durationMs |
+| Recipient failed | `warn` | send.service | campaignId, recipientId, errorMessage |
+| Validation error | `warn` | middleware | path, fields, requestId |
+| Unexpected error | `error` | errorHandler | stack, requestId, userId |
+| Slow DB query >500ms | `warn` | repository | sanitized query, durationMs |
+
+### 6.4 Log Format
+
+```json
+{
+  "level": "info",
+  "time": "2026-04-02T10:23:45.123Z",
+  "requestId": "req_f4a2b1c9",
+  "userId": "usr_abc123",
+  "campaignId": "cmp_xyz789",
+  "event": "campaign.send.completed",
+  "totalSent": 980,
+  "totalFailed": 20,
+  "durationMs": 4321,
+  "msg": "Campaign send completed"
+}
+```
+
+### 6.5 What Must NOT Be Logged
+
+| Data | Why |
+|---|---|
+| JWT tokens | Logs stored in plain text — leaked JWT = account takeover |
+| `password` / `password_hash` | Never log credentials |
+| Full email body content | PII + excessive volume |
+| Raw validation errors on auth fields | May echo back a submitted password |
+| Full recipient email lists | High PII density — log `count` instead |
+
+**Rule:** Log IDs and counts. Never log raw values that could be PII.
+
+### 6.6 Log Levels
+
+| Level | Use for |
+|---|---|
+| `error` | Unhandled exceptions, DB connection failure — requires immediate action |
+| `warn` | Expected business failures: login failed, delivery failed, validation rejected |
+| `info` | Normal lifecycle: request in/out, campaign created, send started/completed |
+| `debug` | High-frequency internals: batch progress, query timing. **Disabled in production** |
+
+### 6.7 Basic Metrics (via log aggregation — no code changes needed)
+
+| Metric | Source |
+|---|---|
+| Campaigns sent per day | Count `event: campaign.send.completed` |
+| Send failure rate | `totalFailed / totalRecipients` on send complete |
+| Average send duration | `durationMs` on send complete |
+| API error rate | Count 5xx in access logs |
+| Auth failure rate | Count `event: auth.login.failed` |
+
+---
+
+## 7. Scalability Considerations
+
+See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level responses:
+
+### 7.1 Write Amplification During Send
+
+**Solution built in:**
+- `send.service.ts` uses batched UPDATEs (200 rows/batch)
+- Repository exposes `batchUpdateStatus(ids[], status)` — never loops individual updates
+
+**Upgrade:** Wrap `send.service.ts` in a BullMQ worker, add horizontal worker replicas. Zero service refactoring needed.
+
+### 7.2 Stats Aggregation Cost
+
+**Solution built in:**
+- Denormalized `sent_count`, `failed_count`, `opened_count` on `campaigns` table
+- Incremented atomically during send: `UPDATE campaigns SET sent_count = sent_count + 1`
+- `GET /campaigns/:id/stats` = single row read, O(1)
+
+### 7.3 Partitioning vs Sharding
+
+**Table Partitioning — YES, applicable when needed:**
+- Range-partition `campaign_recipients` by `created_at` at ~50M rows
+- Native PostgreSQL — no application code changes required
+- Old partitions archived/dropped without full-table lock
+
+**Sharding — NOT applicable here:**
+- Sharding is for when a single instance cannot handle the load at all
+- Adds enormous operational complexity: cross-shard queries lose easy JOINs, distributed transactions, routing logic in app
+- Correct scale-up order: **Partitioning → Read Replica → PgBouncer → only then consider sharding**
+- A campaign manager would need hundreds of millions of rows + thousands of concurrent QPS before sharding is warranted
+
+### 7.4 Connection Pooling
+
+- **Now:** Sequelize built-in pool (`max: 10`)
+- **At scale:** PgBouncer in transaction mode in front of PostgreSQL — update connection string only, no code changes
+
+---
+
+## 8. Trade-offs
+
+### 8.1 Intentional Simplifications
+
+| Decision | Simplified | Why acceptable |
+|---|---|---|
+| Async send | Detached Promise instead of BullMQ | Queue infra adds 30min setup; architecture is queue-ready by design |
+| Stats | Denormalized counters, not real-time | Near-real-time is fine; counters incremented atomically |
+| Pagination | Offset-based | Simple; cursor upgrade documented and isolated to repository layer |
+| Recipient input | Array of IDs in body | Simplifies MVP; segment-based targeting is the upgrade path |
+| Auth | JWT only, no refresh tokens | httpOnly cookie mitigates XSS; adequate for a challenge |
+| Observability | Structured logging only | No Prometheus/Grafana needed at this scale |
+
+### 8.2 What Was NOT Simplified
+
+| Concern | Choice |
+|---|---|
+| Error handling | Global handler, typed `AppError`, stack traces never reach client |
+| Validation | Zod at every boundary; services receive typed, validated data |
+| SQL safety | Repository layer with parameterized queries only |
+| Status transitions | Enforced in service layer, not just UI |
+| Logging | Structured JSON, correlation ID, PII exclusion |
+| DB schema | Proper indexes, partial indexes, FK constraints, CHECK constraints |
+
+### 8.3 Upgrade Path Summary
+
+```
+Simple now                        Scale-ready later
+────────────────────────────────  ────────────────────────────────
+Detached async loop            →  BullMQ worker (send.service unchanged)
+Offset pagination              →  Cursor pagination (repository layer only)
+recipientIds[] in body         →  Segment-based targeting
+Single DB instance             →  Read replica + PgBouncer
+Log to stdout                  →  Loki / Datadog ingestion
+No partitioning                →  Range-partition campaign_recipients at 50M rows
+```
+
+Each upgrade is independent — none requires modifying the others.
+
+---
+
+*Architecture version: 1.0 — last updated 2026-04-02*
