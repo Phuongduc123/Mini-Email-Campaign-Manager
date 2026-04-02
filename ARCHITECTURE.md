@@ -9,7 +9,7 @@ Designed to be simple, production-minded, and incrementally scalable. Avoids ove
 1. [High-Level Overview](#1-high-level-overview)
 2. [Backend Architecture](#2-backend-architecture)
 3. [Frontend Architecture](#3-frontend-architecture)
-4. [API Design Principles](#4-api-design-principles)
+4. [API Design Principles & Response Standard](#4-api-design-principles)
 5. [Async Sending Design](#5-async-sending-design)
 6. [Logging & Observability](#6-logging--observability)
 7. [Scalability Considerations](#7-scalability-considerations)
@@ -365,26 +365,86 @@ Response:
 
 > Offset pagination is used now for simplicity. Cursor-based pagination is the documented upgrade path in SCALABLE.md.
 
-### 4.4 Consistent Response Wrapper
+### 4.4 Standardized API Response Format
 
-Success:
+All endpoints use one of four shapes — chosen by the controller helper. No other shapes are valid.
+
+#### Single resource (200 / 201)
+
+```json
+{ "data": { "id": 1, "name": "Spring Launch", "status": "draft" } }
+```
+
+#### Paginated list (200)
+
 ```json
 {
-  "data": { ... },
-  "meta": { ... }
+  "data": [ { "id": 1, ... }, { "id": 2, ... } ],
+  "meta": {
+    "total": 134,
+    "page": 1,
+    "limit": 20,
+    "totalPages": 7
+  }
 }
 ```
 
-Error:
+#### Deleted / accepted (200 / 202)
+
+```json
+{ "data": null }
+```
+
+#### Error (4xx / 5xx)
+
 ```json
 {
-  "error": "VALIDATION_ERROR",
-  "message": "scheduled_at must be a future timestamp.",
-  "statusCode": 422,
-  "requestId": "req_abc123",
-  "details": [{ "field": "scheduled_at", "issue": "Must be in the future" }]
+  "error": "CAMPAIGN_NOT_DRAFT",
+  "message": "Campaign cannot be edited after it has been scheduled or sent.",
+  "statusCode": 409,
+  "requestId": "req_f4a2b1c9",
+  "details": [{ "field": "scheduled_at", "message": "Must be a future date" }]
 }
 ```
+
+`details` is present **only** on `422 VALIDATION_ERROR` responses. All other errors omit it.
+
+---
+
+#### Controller helpers (`shared/utils/response.ts`)
+
+```typescript
+sendSuccess(res, data)          // 200  { data }
+sendCreated(res, data)          // 201  { data }
+sendDeleted(res)                // 200  { data: null }
+sendPaginated(res, result)      // 200  { data, meta }
+```
+
+The `send` endpoint uses `res.status(202).json({ data: null })` directly — the only raw `res` call allowed.
+
+---
+
+#### Error codes reference
+
+| Code | Status | Trigger |
+|---|---|---|
+| `VALIDATION_ERROR` | 422 | Zod schema rejected the request body |
+| `UNAUTHORIZED` | 401 | Missing or invalid JWT |
+| `NOT_FOUND` | 404 | Resource does not exist or belongs to another user |
+| `CONFLICT` | 409 | Duplicate resource (e.g., email already registered) |
+| `CAMPAIGN_NOT_DRAFT` | 409 | Edit/delete attempted on non-draft campaign |
+| `CAMPAIGN_NOT_SENDABLE` | 409 | Send attempted on already-sent campaign |
+| `INVALID_CREDENTIALS` | 401 | Wrong email or password |
+| `INTERNAL_ERROR` | 500 | Unhandled exception — full stack logged, generic message returned |
+
+---
+
+#### Rules
+
+- Success responses **never** include `success`, `message`, `status`, or `code` fields
+- Error responses **never** include `data`
+- The `requestId` field is always present in errors — correlates to server logs
+- Unexpected errors always return the same generic message: `"An unexpected error occurred."` — the real error is logged server-side only
 
 ---
 
