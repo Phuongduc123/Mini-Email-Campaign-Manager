@@ -10,10 +10,7 @@ export const sequelize = new Sequelize({
   password: config.db.password,
   logging: config.server.nodeEnv === 'development' ? console.log : false,
   define: {
-    underscored: true,       // map camelCase fields to snake_case columns
     timestamps: true,
-    createdAt: 'created_at',
-    updatedAt: 'updated_at',
   },
 });
 

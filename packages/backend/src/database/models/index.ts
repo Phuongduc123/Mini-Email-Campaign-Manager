@@ -15,30 +15,30 @@ RefreshToken.initModel(sequelize);
 // --- Associations ---
 
 // User → Campaign (one-to-many)
-User.hasMany(Campaign, { foreignKey: 'created_by', as: 'campaigns' });
-Campaign.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+User.hasMany(Campaign, { foreignKey: 'createdBy', as: 'campaigns' });
+Campaign.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
 
 // Campaign ↔ Recipient (many-to-many through CampaignRecipient)
 Campaign.belongsToMany(Recipient, {
   through: CampaignRecipient,
-  foreignKey: 'campaign_id',
+  foreignKey: 'campaignId',
   as: 'recipients',
 });
 Recipient.belongsToMany(Campaign, {
   through: CampaignRecipient,
-  foreignKey: 'recipient_id',
+  foreignKey: 'recipientId',
   as: 'campaigns',
 });
 
 // Direct associations for eager loading join table
-Campaign.hasMany(CampaignRecipient, { foreignKey: 'campaign_id', as: 'campaignRecipients' });
-CampaignRecipient.belongsTo(Campaign, { foreignKey: 'campaign_id' });
+Campaign.hasMany(CampaignRecipient, { foreignKey: 'campaignId', as: 'campaignRecipients' });
+CampaignRecipient.belongsTo(Campaign, { foreignKey: 'campaignId' });
 
-Recipient.hasMany(CampaignRecipient, { foreignKey: 'recipient_id' });
-CampaignRecipient.belongsTo(Recipient, { foreignKey: 'recipient_id', as: 'recipient' });
+Recipient.hasMany(CampaignRecipient, { foreignKey: 'recipientId' });
+CampaignRecipient.belongsTo(Recipient, { foreignKey: 'recipientId', as: 'recipient' });
 
 // User → RefreshToken (one-to-many)
-User.hasMany(RefreshToken, { foreignKey: 'user_id', as: 'refreshTokens' });
-RefreshToken.belongsTo(User, { foreignKey: 'user_id' });
+User.hasMany(RefreshToken, { foreignKey: 'userId', as: 'refreshTokens' });
+RefreshToken.belongsTo(User, { foreignKey: 'userId' });
 
 export { sequelize, User, Campaign, Recipient, CampaignRecipient, RefreshToken };
