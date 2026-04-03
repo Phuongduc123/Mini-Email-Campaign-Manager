@@ -11,9 +11,10 @@ Designed to be simple, production-minded, and incrementally scalable. Avoids ove
 3. [Frontend Architecture](#3-frontend-architecture)
 4. [API Design Principles & Response Standard](#4-api-design-principles)
 5. [Async Sending Design](#5-async-sending-design)
-6. [Logging & Observability](#6-logging--observability)
-7. [Scalability Considerations](#7-scalability-considerations)
-8. [Trade-offs](#8-trade-offs)
+6. [Authentication & Token Strategy](#6-authentication--token-strategy)
+7. [Logging & Observability](#7-logging--observability)
+8. [Scalability Considerations](#8-scalability-considerations)
+9. [Trade-offs](#9-trade-offs)
 
 ---
 
@@ -506,9 +507,144 @@ Phase 3:   Multiple worker replicas, sharded by campaign_id
 
 ---
 
-## 6. Logging & Observability
+## 6. Authentication & Token Strategy
 
-### 6.1 Logger Setup
+### 6.1 Token Types
+
+| Token | Format | Lifetime | Storage |
+|---|---|---|---|
+| **Access token** | Signed JWT (HS256) | 15 minutes | Memory / `Authorization: Bearer` header |
+| **Refresh token** | Random UUID (v4) | 7 days | Secure httpOnly cookie or client-side store |
+
+Access tokens are short-lived to limit the blast radius of a leak. Refresh tokens cover the full session and are only exchanged on the dedicated `/auth/refresh` endpoint.
+
+### 6.2 Token Flow
+
+```
+┌─────────┐         ┌────────────────┐        ┌──────────────┐
+│  Client │         │  Auth Service  │        │  PostgreSQL  │
+└────┬────┘         └───────┬────────┘        └──────┬───────┘
+     │                      │                        │
+     │  POST /auth/register  │                        │
+     │  POST /auth/login     │                        │
+     │──────────────────────►│                        │
+     │                       │  INSERT refresh_tokens │
+     │                       │───────────────────────►│
+     │                       │                        │
+     │◄──────────────────────│                        │
+     │  { accessToken,       │                        │
+     │    refreshToken,      │                        │
+     │    user }             │                        │
+     │                       │                        │
+     │  (15 min passes...)   │                        │
+     │                       │                        │
+     │  POST /auth/refresh   │                        │
+     │  { refreshToken }     │                        │
+     │──────────────────────►│                        │
+     │                       │  SELECT + validate     │
+     │                       │───────────────────────►│
+     │                       │  UPDATE revokedAt      │  ← old token revoked
+     │                       │───────────────────────►│
+     │                       │  INSERT new token      │  ← new token issued
+     │                       │───────────────────────►│
+     │◄──────────────────────│                        │
+     │  { accessToken,       │                        │
+     │    refreshToken }     │                        │
+     │                       │                        │
+     │  POST /auth/logout    │                        │
+     │  { refreshToken }     │                        │
+     │──────────────────────►│                        │
+     │                       │  UPDATE revokedAt      │
+     │                       │───────────────────────►│
+     │◄──────────────────────│                        │
+     │  200 OK               │                        │
+```
+
+### 6.3 Token Rotation (Single-Use Refresh Tokens)
+
+Every call to `POST /auth/refresh` performs **token rotation**:
+
+```
+1. Look up stored token by hash
+2. Validate: not expired, not revoked
+3. Revoke old token  (revokedAt = NOW)      ← single-use enforced
+4. Issue brand-new refresh token
+5. Return new access token + new refresh token
+```
+
+**Why rotation?** If a refresh token is stolen and used by an attacker, the legitimate user's next refresh will fail (their token has already been rotated). This creates a detectable signal: two parties racing on the same token — the losing party gets a 401, and the session can be terminated.
+
+### 6.4 Database Design (`refresh_tokens` table)
+
+```
+refresh_tokens
+──────────────────────────────────────────
+id           SERIAL PRIMARY KEY
+user_id      INTEGER  FK → users(id)  ON DELETE CASCADE
+token_hash   VARCHAR(64)  UNIQUE       ← SHA-256 of raw token
+expires_at   TIMESTAMPTZ NOT NULL
+revoked_at   TIMESTAMPTZ DEFAULT NULL
+created_at   TIMESTAMPTZ DEFAULT NOW()
+```
+
+**Indexes:**
+- `UNIQUE (token_hash)` — fast lookup by hash
+- `(user_id)` — fast `revokeAllUserRefreshTokens(userId)` on password change / account delete
+
+**Raw token never stored.** Only the SHA-256 hex digest is persisted:
+
+```typescript
+// auth.repository.ts
+const hash = createHash('sha256').update(rawToken).digest('hex');
+await RefreshToken.create({ userId, tokenHash: hash, expiresAt });
+```
+
+This means a database breach does not expose usable tokens.
+
+### 6.5 Auth Endpoints Summary
+
+| Method | Path | Auth required | Rate limited | Description |
+|---|---|---|---|---|
+| `POST` | `/auth/register` | No | Yes (10 req/15 min) | Create account → return token pair |
+| `POST` | `/auth/login` | No | Yes (10 req/15 min) | Verify credentials → return token pair |
+| `POST` | `/auth/refresh` | No | Yes (10 req/15 min) | Rotate refresh token → return new pair |
+| `POST` | `/auth/logout` | No | No | Revoke refresh token |
+
+### 6.6 Security Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| 15-minute access token TTL | Short window limits impact of a leaked JWT — no revocation needed |
+| Refresh token as random UUID | Opaque, unguessable — no information embedded unlike JWT |
+| SHA-256 hash in DB | DB breach doesn't yield usable tokens |
+| Token rotation on every refresh | Detect token theft: simultaneous use → 401 on second use |
+| `ON DELETE CASCADE` on `user_id` | Deleting a user removes all their tokens atomically |
+| Rate limiting on all auth routes | Blocks brute-force and token enumeration attempts |
+| Logout revokes by token (not user) | Supports multiple device sessions; logout one session only |
+
+### 6.7 Middleware Flow for Protected Routes
+
+```
+Request to protected endpoint
+  │
+  ├─ authenticate.middleware.ts
+  │   ├─ Extract Bearer token from Authorization header
+  │   ├─ jwt.verify(token, secret)
+  │   │   ├─ Invalid signature → 401 UNAUTHORIZED
+  │   │   └─ Expired → 401 UNAUTHORIZED
+  │   └─ Attach { id, email } to req.user
+  │
+  └─ Controller (req.user is guaranteed non-null here)
+```
+
+Access tokens are **stateless** — no DB lookup on every request. Revocation is handled by short TTL + refresh token rotation.
+
+---
+
+## 7. Logging & Observability
+
+
+### 7.1 Logger Setup
 
 Use **pino** configured in `config/logger.ts`:
 
@@ -517,7 +653,7 @@ Development:  pino-pretty  (human-readable, colorized)
 Production:   JSON lines   (structured, machine-parseable, ships to Loki/Datadog)
 ```
 
-### 6.2 Request ID (Correlation ID)
+### 7.2 Request ID (Correlation ID)
 
 Every request gets a unique ID from `requestId.ts` middleware:
 
@@ -530,7 +666,7 @@ Request arrives
 
 This allows tracing a complete request flow across all log lines — from route through service through repository.
 
-### 6.3 What Gets Logged (and Where)
+### 7.3 What Gets Logged (and Where)
 
 | Event | Level | Layer | Fields |
 |---|---|---|---|
@@ -548,7 +684,7 @@ This allows tracing a complete request flow across all log lines — from route 
 | Unexpected error | `error` | errorHandler | stack, requestId, userId |
 | Slow DB query >500ms | `warn` | repository | sanitized query, durationMs |
 
-### 6.4 Log Format
+### 7.4 Log Format
 
 ```json
 {
@@ -565,7 +701,7 @@ This allows tracing a complete request flow across all log lines — from route 
 }
 ```
 
-### 6.5 What Must NOT Be Logged
+### 7.5 What Must NOT Be Logged
 
 | Data | Why |
 |---|---|
@@ -577,7 +713,7 @@ This allows tracing a complete request flow across all log lines — from route 
 
 **Rule:** Log IDs and counts. Never log raw values that could be PII.
 
-### 6.6 Log Levels
+### 7.6 Log Levels
 
 | Level | Use for |
 |---|---|
@@ -586,7 +722,7 @@ This allows tracing a complete request flow across all log lines — from route 
 | `info` | Normal lifecycle: request in/out, campaign created, send started/completed |
 | `debug` | High-frequency internals: batch progress, query timing. **Disabled in production** |
 
-### 6.7 Basic Metrics (via log aggregation — no code changes needed)
+### 7.7 Basic Metrics (via log aggregation — no code changes needed)
 
 | Metric | Source |
 |---|---|
@@ -598,11 +734,11 @@ This allows tracing a complete request flow across all log lines — from route 
 
 ---
 
-## 7. Scalability Considerations
+## 8. Scalability Considerations
 
 See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level responses:
 
-### 7.1 Write Amplification During Send
+### 8.1 Write Amplification During Send
 
 **Solution built in:**
 - `send.service.ts` uses batched UPDATEs (200 rows/batch)
@@ -610,14 +746,14 @@ See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level 
 
 **Upgrade:** Wrap `send.service.ts` in a BullMQ worker, add horizontal worker replicas. Zero service refactoring needed.
 
-### 7.2 Stats Aggregation Cost
+### 8.2 Stats Aggregation Cost
 
 **Solution built in:**
 - Denormalized `sent_count`, `failed_count`, `opened_count` on `campaigns` table
 - Incremented atomically during send: `UPDATE campaigns SET sent_count = sent_count + 1`
 - `GET /campaigns/:id/stats` = single row read, O(1)
 
-### 7.3 Partitioning vs Sharding
+### 8.3 Partitioning vs Sharding
 
 **Table Partitioning — YES, applicable when needed:**
 - Range-partition `campaign_recipients` by `created_at` at ~50M rows
@@ -630,16 +766,16 @@ See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level 
 - Correct scale-up order: **Partitioning → Read Replica → PgBouncer → only then consider sharding**
 - A campaign manager would need hundreds of millions of rows + thousands of concurrent QPS before sharding is warranted
 
-### 7.4 Connection Pooling
+### 8.4 Connection Pooling
 
 - **Now:** Sequelize built-in pool (`max: 10`)
 - **At scale:** PgBouncer in transaction mode in front of PostgreSQL — update connection string only, no code changes
 
 ---
 
-## 8. Trade-offs
+## 9. Trade-offs
 
-### 8.1 Intentional Simplifications
+### 9.1 Intentional Simplifications
 
 | Decision | Simplified | Why acceptable |
 |---|---|---|
@@ -647,10 +783,10 @@ See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level 
 | Stats | Denormalized counters, not real-time | Near-real-time is fine; counters incremented atomically |
 | Pagination | Offset-based | Simple; cursor upgrade documented and isolated to repository layer |
 | Recipient input | Array of IDs in body | Simplifies MVP; segment-based targeting is the upgrade path |
-| Auth | JWT only, no refresh tokens | httpOnly cookie mitigates XSS; adequate for a challenge |
+| Auth | JWT (15 min) + UUID refresh tokens (7 days, SHA-256 hashed, rotated on each use) | Stateless access, short TTL, DB-backed revocation via refresh token |
 | Observability | Structured logging only | No Prometheus/Grafana needed at this scale |
 
-### 8.2 What Was NOT Simplified
+### 9.2 What Was NOT Simplified
 
 | Concern | Choice |
 |---|---|
@@ -661,7 +797,7 @@ See [SCALABLE.md](SCALABLE.md) for full bottleneck analysis. Architecture-level 
 | Logging | Structured JSON, correlation ID, PII exclusion |
 | DB schema | Proper indexes, partial indexes, FK constraints, CHECK constraints |
 
-### 8.3 Upgrade Path Summary
+### 9.3 Upgrade Path Summary
 
 ```
 Simple now                        Scale-ready later
@@ -678,4 +814,4 @@ Each upgrade is independent — none requires modifying the others.
 
 ---
 
-*Architecture version: 1.0 — last updated 2026-04-02*
+*Architecture version: 1.1 — last updated 2026-04-03*

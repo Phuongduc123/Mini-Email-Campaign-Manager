@@ -17,6 +17,8 @@ export const config = {
   },
   jwt: {
     secret: process.env.JWT_SECRET ?? 'fallback-secret-do-not-use-in-prod',
-    expiresIn: process.env.JWT_EXPIRES_IN ?? '7d',
+    expiresIn: process.env.JWT_EXPIRES_IN ?? '15m',          // access token — short-lived
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN ?? '7d', // refresh token — long-lived
+    refreshExpiresInMs: 7 * 24 * 60 * 60 * 1000,            // 7 days in ms for DB expiresAt
   },
 } as const;

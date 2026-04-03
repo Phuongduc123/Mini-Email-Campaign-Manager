@@ -82,8 +82,11 @@ export class CampaignController {
 
   send = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      await this.campaignService.send(Number(req.params.id), req.user!.id);
-      res.status(202).json({ data: null });
+      const campaign = await this.campaignService.send(Number(req.params.id), req.user!.id);
+      res.status(202).json({
+        data: campaign,
+        message: 'Campaign send initiated. Poll GET /campaigns/:id/stats to track progress.',
+      });
     } catch (err) {
       next(err);
     }
