@@ -7,7 +7,7 @@ import {
   ListCampaignQuery,
 } from './campaign.schema';
 import { AuthRequest } from '../../shared/types';
-import { sendSuccess, sendCreated, sendDeleted, sendPaginated } from '../../shared/utils/response';
+import { sendSuccess, sendCreated, sendDeleted, sendCursorPaginated } from '../../shared/utils/response';
 
 export class CampaignController {
   constructor(private readonly campaignService: CampaignService) {}
@@ -18,7 +18,7 @@ export class CampaignController {
         req.user!.id,
         req.query as unknown as ListCampaignQuery,
       );
-      sendPaginated(res, result);
+      sendCursorPaginated(res, result);
     } catch (err) {
       next(err);
     }

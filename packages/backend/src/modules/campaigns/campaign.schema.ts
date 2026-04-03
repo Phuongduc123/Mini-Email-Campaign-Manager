@@ -21,7 +21,7 @@ export const scheduleCampaignSchema = z.object({
 });
 
 export const listCampaignQuerySchema = z.object({
-  page: z.coerce.number().int().positive().default(1),
+  cursor: z.string().optional(),
   limit: z.coerce.number().int().positive().max(100).default(20),
   status: z.enum(['draft', 'scheduled', 'sending', 'sent']).optional(),
 });

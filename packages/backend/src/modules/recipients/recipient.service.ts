@@ -1,14 +1,14 @@
 import { RecipientRepository } from './recipient.repository';
 import { CreateRecipientDto, ListRecipientQuery } from './recipient.schema';
 import { Recipient } from '../../database/models/Recipient';
-import { PaginatedResult } from '../../shared/types';
+import { CursorPaginatedResult } from '../../shared/types';
 import { ConflictError } from '../../shared/utils/errors';
 import { logger } from '../../config/logger';
 
 export class RecipientService {
   constructor(private readonly recipientRepository: RecipientRepository) {}
 
-  async list(query: ListRecipientQuery): Promise<PaginatedResult<Recipient>> {
+  async list(query: ListRecipientQuery): Promise<CursorPaginatedResult<Recipient>> {
     return this.recipientRepository.findAll(query);
   }
 

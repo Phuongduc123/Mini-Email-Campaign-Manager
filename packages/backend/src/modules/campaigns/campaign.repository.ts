@@ -2,34 +2,39 @@ import { Op } from 'sequelize';
 import { Campaign } from '../../database/models/Campaign';
 import { CampaignRecipient } from '../../database/models/CampaignRecipient';
 import { Recipient } from '../../database/models/Recipient';
-import { CampaignStatus, PaginatedResult } from '../../shared/types';
+import { CampaignStatus, CursorPaginatedResult } from '../../shared/types';
 import { CreateCampaignDto, ListCampaignQuery } from './campaign.schema';
+
+function encodeCursor(id: number): string {
+  return Buffer.from(String(id)).toString('base64');
+}
+
+function decodeCursor(cursor: string): number {
+  return parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10);
+}
 
 export class CampaignRepository {
   async findAll(
     createdBy: number,
     query: ListCampaignQuery,
-  ): Promise<PaginatedResult<Campaign>> {
-    const { page, limit, status } = query;
-    const offset = (page - 1) * limit;
+  ): Promise<CursorPaginatedResult<Campaign>> {
+    const { cursor, limit, status } = query;
 
     const where: Record<string, unknown> = { createdBy };
     if (status) where['status'] = status;
+    if (cursor) where['id'] = { [Op.lt]: decodeCursor(cursor) };
 
-    const { count, rows } = await Campaign.findAndCountAll({
+    const rows = await Campaign.findAll({
       where,
-      limit,
-      offset,
-      order: [['created_at', 'DESC']],
+      limit: limit + 1,
+      order: [['id', 'DESC']],
     });
 
-    return {
-      items: rows,
-      total: count,
-      page,
-      limit,
-      totalPages: Math.ceil(count / limit),
-    };
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? encodeCursor(items[items.length - 1].id) : null;
+
+    return { items, nextCursor, hasMore };
   }
 
   async findById(id: number): Promise<Campaign | null> {
@@ -89,26 +94,9 @@ export class CampaignRepository {
     return campaign.update({ status });
   }
 
-  async getStats(campaignId: number): Promise<{
-    total: number;
-    sent: number;
-    failed: number;
-    opened: number;
-    open_rate: number;
-    send_rate: number;
-  }> {
-    const [total, sent, failed, opened] = await Promise.all([
-      CampaignRecipient.count({ where: { campaignId } }),
-      CampaignRecipient.count({ where: { campaignId, status: 'sent' } }),
-      CampaignRecipient.count({ where: { campaignId, status: 'failed' } }),
-      CampaignRecipient.count({
-        where: { campaignId, openedAt: { [Op.ne]: null } },
-      }),
-    ]);
-
-    const send_rate = total > 0 ? sent / total : 0;
-    const open_rate = sent > 0 ? opened / sent : 0;
-
-    return { total, sent, failed, opened, open_rate, send_rate };
+  async countOpened(campaignId: number): Promise<number> {
+    return CampaignRecipient.count({
+      where: { campaignId, openedAt: { [Op.ne]: null } },
+    });
   }
 }
