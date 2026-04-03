@@ -8,6 +8,7 @@ export const useSendCampaign = (id: number) => {
     mutationFn: () => campaignsApi.send(id),
     onSuccess: (updated) => {
       queryClient.setQueryData(['campaign', id], updated);
+      queryClient.invalidateQueries({ queryKey: ['campaign', id] });
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
       queryClient.invalidateQueries({ queryKey: ['campaign-stats', id] });
     },
