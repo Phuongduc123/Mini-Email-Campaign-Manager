@@ -37,6 +37,27 @@ Target:   [API] → Queue → [Worker 1] [Worker 2] [Worker N] → batched UPDAT
 
 ## 2. High Priority Problems
 
+### 1.2 In-Process Cron Scheduler — No Distributed Lock
+
+The campaign scheduler (`campaign.scheduler.ts`) runs a `node-cron` job every minute inside the same process as the HTTP server. At scale:
+
+- **Multi-instance race condition:** Two instances running simultaneously both SELECT the same `scheduled` campaigns before either has committed the `sending` status update — the same campaign gets dispatched twice, emails sent twice.
+- **No crash recovery:** If the process dies between `scheduledAt` and the next tick, the campaign is never dispatched until the server restarts. There is no persistent record that a dispatch was missed.
+- **Overlapping ticks:** A tick that takes >1 minute (large campaign) will overlap with the next tick — `status='sending'` prevents double-dispatch for that campaign, but the cron queue grows unbounded.
+- **Couples scheduling with HTTP serving:** A slow send loop consumes event-loop resources that should be serving API requests.
+
+**Fix:** Replace the in-process cron with a job queue (BullMQ + Redis) and a dedicated worker process. The scheduler enqueues a job at schedule time; the worker consumes it exactly once with at-least-once delivery guarantees and automatic retry.
+
+```
+Current:  [cron tick] → SELECT due → UPDATE sending → executeSend (in-process)
+Target:   [POST /schedule] → enqueue(jobId, runAt) → [Worker] → executeSend (separate process)
+```
+
+For multi-instance deployments before a full queue migration, a Redis-based distributed lock (`redlock`) on the cron tick prevents double-dispatch as an interim fix.
+
+---
+
+
 ### 2.1 Stats Computed Live on Every Request
 
 > Requirement: `GET /campaigns/:id/stats` → `open_rate`, `send_rate`, `total`, `sent`, `failed`, `opened`
@@ -194,14 +215,15 @@ All reads (stats, campaign lists, recipient lookups) and all writes (send worker
 | # | Problem | Impact | Urgency |
 |---|---|---|---|
 | 1 | Single-process send loop | Data loss on crash, cannot scale horizontally | **Critical** |
-| 2 | Live stats aggregation | Query timeout at scale | **High** |
-| 3 | Unpaginated `GET /recipients` | OOM / server crash | **High** |
-| 4 | Recipient IDs in request body | 4MB+ payloads, single transaction timeout | **High** |
-| 5 | No rate limiting on auth | Security + resource exhaustion | **Medium** |
-| 6 | Offset pagination on campaigns | Slow at page 500+ | **Medium** |
-| 7 | No unsubscribe flow | Legal / deliverability risk | **Medium** |
-| 8 | No read replicas / connection pooling | DB saturation under sustained load | **Low (infra)** |
+| 2 | In-process cron scheduler, no distributed lock | Double-send on multi-instance, no crash recovery | **Critical** |
+| 3 | Live stats aggregation | Query timeout at scale | **High** |
+| 4 | Unpaginated `GET /recipients` | OOM / server crash | **High** |
+| 5 | Recipient IDs in request body | 4MB+ payloads, single transaction timeout | **High** |
+| 6 | No rate limiting on auth | Security + resource exhaustion | **Medium** |
+| 7 | Offset pagination on campaigns | Slow at page 500+ | **Medium** |
+| 8 | No unsubscribe flow | Legal / deliverability risk | **Medium** |
+| 9 | No read replicas / connection pooling | DB saturation under sustained load | **Low (infra)** |
 
 ---
 
-*Analysis version: 1.0 — last updated 2026-03-31*
+*Analysis version: 1.1 — last updated 2026-04-03*
