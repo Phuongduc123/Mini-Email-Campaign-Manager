@@ -23,6 +23,17 @@ export class CampaignRecipient
   public errorMessage!: string | null;
   public retryCount!: number;
 
+  toJSON() {
+    const values = super.toJSON() as unknown as Record<string, unknown>;
+    for (const key of Object.keys(values)) {
+      if (key.includes('_')) {
+        const camelKey = key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+        if (camelKey in values) delete values[key];
+      }
+    }
+    return values;
+  }
+
   static initModel(sequelize: Sequelize): typeof CampaignRecipient {
     CampaignRecipient.init(
       {
