@@ -40,9 +40,19 @@ export class CampaignService {
       );
     }
 
-    const updated = await this.campaignRepository.update(campaign, dto as Partial<Campaign>);
+    const { recipientIds, ...campaignFields } = dto;
+
+    if (Object.keys(campaignFields).length > 0) {
+      await this.campaignRepository.update(campaign, campaignFields as Partial<Campaign>);
+    }
+
+    if (recipientIds && recipientIds.length > 0) {
+      await this.campaignRepository.replaceRecipients(id, recipientIds);
+    }
+
+    const updated = await this.campaignRepository.findById(id);
     logger.info({ event: 'campaign.updated', campaignId: id, userId }, 'Campaign updated');
-    return updated;
+    return updated!;
   }
 
   async delete(id: number, userId: number): Promise<void> {
@@ -82,7 +92,7 @@ export class CampaignService {
     return updated;
   }
 
-  async send(id: number, userId: number): Promise<void> {
+  async send(id: number, userId: number): Promise<Campaign> {
     // Imported here to avoid circular deps at module load time
     const { executeSend } = await import('./send.service');
 
@@ -95,7 +105,7 @@ export class CampaignService {
       );
     }
 
-    await this.campaignRepository.updateStatus(campaign, 'sending');
+    const updated = await this.campaignRepository.updateStatus(campaign, 'sending');
     logger.info({ event: 'campaign.send.started', campaignId: id, userId }, 'Campaign send initiated');
 
     // Fire and forget — do NOT await. Return 202 immediately.
@@ -107,6 +117,8 @@ export class CampaignService {
         );
       });
     });
+
+    return updated;
   }
 
   async getStats(

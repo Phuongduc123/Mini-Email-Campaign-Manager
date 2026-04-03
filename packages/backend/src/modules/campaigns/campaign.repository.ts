@@ -66,6 +66,20 @@ export class CampaignRepository {
     return campaign.update(data);
   }
 
+  async replaceRecipients(campaignId: number, recipientIds: number[]): Promise<void> {
+    await CampaignRecipient.destroy({ where: { campaignId } });
+    const links = recipientIds.map((recipientId) => ({
+      campaignId,
+      recipientId,
+      status: 'pending' as const,
+      sentAt: null,
+      openedAt: null,
+      errorMessage: null,
+      retryCount: 0,
+    }));
+    await CampaignRecipient.bulkCreate(links);
+  }
+
   async delete(campaign: Campaign): Promise<void> {
     await CampaignRecipient.destroy({ where: { campaignId: campaign.id } });
     await campaign.destroy();

@@ -43,7 +43,8 @@ export const swaggerSpec = {
       AuthResponse: {
         type: 'object',
         properties: {
-          token: { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+          accessToken:  { type: 'string', description: 'Short-lived JWT (15 min). Use in Authorization: Bearer header.', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+          refreshToken: { type: 'string', description: 'Long-lived token (7 days). Use to obtain a new accessToken via POST /auth/refresh.', example: '550e8400-e29b-41d4-a716-446655440000' },
           user: {
             type: 'object',
             properties: {
@@ -52,6 +53,13 @@ export const swaggerSpec = {
               name:  { type: 'string', example: 'John Doe' },
             },
           },
+        },
+      },
+      TokenPair: {
+        type: 'object',
+        properties: {
+          accessToken:  { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+          refreshToken: { type: 'string', example: '550e8400-e29b-41d4-a716-446655440000' },
         },
       },
 
@@ -72,6 +80,28 @@ export const swaggerSpec = {
           createdBy:   { type: 'integer', example: 1 },
           createdAt:   { type: 'string', format: 'date-time' },
           updatedAt:   { type: 'string', format: 'date-time' },
+          campaignRecipients: {
+            type: 'array',
+            description: 'Included on GET /campaigns/:id only',
+            items: {
+              type: 'object',
+              properties: {
+                recipientId: { type: 'integer', example: 1 },
+                status:      { type: 'string', enum: ['pending', 'sent', 'failed'] },
+                sentAt:      { type: 'string', format: 'date-time', nullable: true },
+                openedAt:    { type: 'string', format: 'date-time', nullable: true },
+                errorMessage:{ type: 'string', nullable: true },
+                recipient: {
+                  type: 'object',
+                  properties: {
+                    id:    { type: 'integer', example: 1 },
+                    email: { type: 'string', example: 'alice@example.com' },
+                    name:  { type: 'string', example: 'Alice' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
       CampaignStats: {
@@ -135,10 +165,64 @@ export const swaggerSpec = {
         },
       },
     },
+    '/auth/refresh': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Refresh access token',
+        description: 'Exchange a valid refresh token for a new access token + new refresh token (rotation). The old refresh token is immediately revoked.',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['refreshToken'],
+                properties: {
+                  refreshToken: { type: 'string', example: '550e8400-e29b-41d4-a716-446655440000' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'New token pair issued',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/TokenPair' } } },
+          },
+          401: { description: 'Refresh token is invalid, expired, or already revoked', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/auth/logout': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Logout (revoke refresh token)',
+        description: 'Revokes the provided refresh token. The access token remains valid until it expires naturally (max 15 min).',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['refreshToken'],
+                properties: {
+                  refreshToken: { type: 'string', example: '550e8400-e29b-41d4-a716-446655440000' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: 'Logged out successfully' },
+        },
+      },
+    },
     '/auth/login': {
       post: {
         tags: ['Auth'],
-        summary: 'Login and receive JWT',
+        summary: 'Login and receive tokens',
         security: [],
         requestBody: {
           required: true,
@@ -231,6 +315,7 @@ export const swaggerSpec = {
       patch: {
         tags: ['Campaigns'],
         summary: 'Update campaign (draft only)',
+        description: 'All fields are optional. If `recipientIds` is provided it **replaces** the entire recipient list — existing recipients not in the new array will be removed.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
         requestBody: {
           content: {
@@ -238,9 +323,15 @@ export const swaggerSpec = {
               schema: {
                 type: 'object',
                 properties: {
-                  name:    { type: 'string' },
-                  subject: { type: 'string' },
-                  body:    { type: 'string' },
+                  name:         { type: 'string', example: 'Updated Newsletter' },
+                  subject:      { type: 'string', example: 'New subject line' },
+                  body:         { type: 'string', example: '<h1>Updated body</h1>' },
+                  recipientIds: {
+                    type: 'array',
+                    items: { type: 'integer' },
+                    example: [1, 2, 3],
+                    description: 'Replaces ALL existing recipients. Must be non-empty if provided.',
+                  },
                 },
               },
             },
@@ -296,10 +387,25 @@ export const swaggerSpec = {
       post: {
         tags: ['Campaigns'],
         summary: 'Trigger async send (returns 202 immediately)',
+        description: 'Sets campaign status to `sending` and starts async delivery in the background. Returns the updated campaign immediately — do not wait for delivery to finish. Poll `GET /campaigns/:id/stats` to track progress.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
         responses: {
-          200: { description: 'Send initiated — poll /stats to track progress' },
-          409: { description: 'Campaign is not sendable', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          202: {
+            description: 'Send initiated — campaign is now in `sending` status',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data:    { $ref: '#/components/schemas/Campaign' },
+                    message: { type: 'string', example: 'Campaign send initiated. Poll GET /campaigns/:id/stats to track progress.' },
+                  },
+                },
+              },
+            },
+          },
+          409: { description: 'Campaign is not in draft or scheduled status', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'Campaign not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
