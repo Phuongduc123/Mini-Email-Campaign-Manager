@@ -1,3 +1,5 @@
+import { useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { CampaignRecipientEntry, RecipientStatus } from '@/types/campaign';
 
 interface RecipientTableProps {
@@ -10,12 +12,24 @@ const RECIPIENT_STATUS_CONFIG: Record<RecipientStatus, { label: string; classNam
   failed: { label: 'Failed', className: 'bg-red-100 text-red-700' },
 };
 
+const ROW_HEIGHT = 53;
+const MAX_VISIBLE_ROWS = 10;
+
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—';
   return new Date(dateStr).toLocaleString();
 }
 
 export function RecipientTable({ recipients }: RecipientTableProps) {
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: recipients.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 5,
+  });
+
   if (recipients.length === 0) {
     return (
       <div className="text-center py-8 text-gray-500 text-sm">
@@ -24,53 +38,70 @@ export function RecipientTable({ recipients }: RecipientTableProps) {
     );
   }
 
+  const containerHeight = Math.min(recipients.length * ROW_HEIGHT, MAX_VISIBLE_ROWS * ROW_HEIGHT);
+
   return (
-    <div className="overflow-x-auto rounded-lg border border-gray-200">
-      <table className="min-w-full divide-y divide-gray-200">
-        <thead className="bg-gray-50">
-          <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Name
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Email
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Status
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Sent At
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Opened At
-            </th>
-          </tr>
-        </thead>
-        <tbody className="bg-white divide-y divide-gray-200">
-          {recipients.map((entry) => {
+    <div className="rounded-lg border border-gray-200 overflow-hidden">
+      {/* Fixed header */}
+      <div className="bg-gray-50 border-b border-gray-200">
+        <div className="grid grid-cols-[2fr_2fr_1fr_1.5fr_1.5fr] px-4 py-3">
+          {['Name', 'Email', 'Status', 'Sent At', 'Opened At'].map((h) => (
+            <span key={h} className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+              {h}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Virtualised rows — only renders visible rows in DOM */}
+      <div
+        ref={parentRef}
+        style={{ height: containerHeight, overflowY: 'auto' }}
+        className="bg-white"
+      >
+        <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>
+          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const entry = recipients[virtualRow.index];
             const { label, className } = RECIPIENT_STATUS_CONFIG[entry.status];
+
             return (
-              <tr key={`${entry.campaignId}-${entry.recipientId}`} className="hover:bg-gray-50">
-                <td className="px-4 py-3 text-sm text-gray-800">
+              <div
+                key={`${entry.campaignId}-${entry.recipientId}`}
+                style={{
+                  position: 'absolute',
+                  top: virtualRow.start,
+                  left: 0,
+                  right: 0,
+                  height: ROW_HEIGHT,
+                }}
+                className="grid grid-cols-[2fr_2fr_1fr_1.5fr_1.5fr] items-center px-4 border-b border-gray-100 hover:bg-gray-50"
+              >
+                <span className="text-sm text-gray-800 truncate pr-2">
                   {entry.recipient?.name ?? '—'}
-                </td>
-                <td className="px-4 py-3 text-sm text-gray-600">
+                </span>
+                <span className="text-sm text-gray-600 truncate pr-2">
                   {entry.recipient?.email ?? `Recipient #${entry.recipientId}`}
-                </td>
-                <td className="px-4 py-3">
+                </span>
+                <span>
                   <span
                     className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${className}`}
                   >
                     {label}
                   </span>
-                </td>
-                <td className="px-4 py-3 text-sm text-gray-500">{formatDate(entry.sentAt)}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">{formatDate(entry.openedAt)}</td>
-              </tr>
+                </span>
+                <span className="text-sm text-gray-500">{formatDate(entry.sentAt)}</span>
+                <span className="text-sm text-gray-500">{formatDate(entry.openedAt)}</span>
+              </div>
             );
           })}
-        </tbody>
-      </table>
+        </div>
+      </div>
+
+      {recipients.length > MAX_VISIBLE_ROWS && (
+        <div className="bg-gray-50 border-t border-gray-200 px-4 py-2 text-xs text-gray-500">
+          {recipients.length.toLocaleString()} recipients — scroll to view all
+        </div>
+      )}
     </div>
   );
 }
