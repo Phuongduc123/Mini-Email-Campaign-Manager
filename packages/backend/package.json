@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "migrate": "ts-node src/database/migrate.ts",
     "test": "jest",
+    "test:coverage": "jest --coverage",
     "worker": "ts-node src/workers/campaign.worker.ts",
     "worker:prod": "node dist/workers/campaign.worker.js",
     "lint": "eslint 'src/**/*.ts'",
@@ -23,7 +24,15 @@
       "ts",
       "js",
       "json"
-    ]
+    ],
+    "collectCoverageFrom": [
+      "src/modules/**/*.ts",
+      "src/middleware/**/*.ts",
+      "src/shared/**/*.ts",
+      "!src/**/*.d.ts"
+    ],
+    "coverageReporters": ["text", "lcov", "html"],
+    "coverageDirectory": "coverage"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
