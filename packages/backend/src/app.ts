@@ -23,7 +23,7 @@ export const createApp = (): Application => {
       logger.info(
         {
           event: 'http.request',
-          requestId: (req as any).requestId,
+          requestId: req.requestId,
           method: req.method,
           path: req.path,
           statusCode: res.statusCode,

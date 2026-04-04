@@ -30,7 +30,7 @@ export const errorHandler = (
   const code = err.code ?? 'INTERNAL_ERROR';
   const isOperational = err.isOperational ?? false;
   const message = isOperational ? err.message : 'An unexpected error occurred.';
-  const requestId = (req as any).requestId;
+  const requestId = req.requestId;
 
   if (!isOperational) {
     logger.error(
