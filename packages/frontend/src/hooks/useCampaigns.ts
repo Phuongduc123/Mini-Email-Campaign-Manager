@@ -5,5 +5,6 @@ export const useCampaigns = (params: ListCampaignsParams = {}) => {
   return useQuery({
     queryKey: ['campaigns', params],
     queryFn: () => campaignsApi.list(params),
+    staleTime: 30_000,
   });
 };

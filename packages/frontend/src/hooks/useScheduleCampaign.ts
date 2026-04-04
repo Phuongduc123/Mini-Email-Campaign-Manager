@@ -9,7 +9,6 @@ export const useScheduleCampaign = (id: number) => {
     mutationFn: (payload: ScheduleCampaignPayload) => campaignsApi.schedule(id, payload),
     onSuccess: (updated) => {
       queryClient.setQueryData(['campaign', id], updated);
-      queryClient.invalidateQueries({ queryKey: ['campaign', id] });
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
     },
   });

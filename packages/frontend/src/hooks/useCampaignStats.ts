@@ -7,6 +7,8 @@ export const useCampaignStats = (id: number, campaignStatus: CampaignStatus | un
     queryKey: ['campaign-stats', id],
     queryFn: () => campaignsApi.getStats(id),
     enabled: !!id,
-    refetchInterval: campaignStatus === 'sending' ? 2000 : false,
+    // Poll only while actively sending; stop when tab is hidden
+    refetchInterval: campaignStatus === 'sending' ? 5000 : false,
+    refetchIntervalInBackground: false,
   });
 };
