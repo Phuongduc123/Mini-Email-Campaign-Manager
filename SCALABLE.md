@@ -210,7 +210,211 @@ All reads (stats, campaign lists, recipient lookups) and all writes (send worker
 
 ---
 
-## 5. Priority Summary
+## 5. Frontend UX & Performance Problems
+
+### 5.1 `RecipientTable` Renders Entire Array — No Virtualization
+
+`CampaignDetailPage` passes the full `campaign.campaignRecipients` array directly to `RecipientTable` with no size limit:
+
+```tsx
+// CampaignDetailPage.tsx
+<RecipientTable recipients={campaign.campaignRecipients ?? []} />
+```
+
+At 10,000 recipients: 10,000 `<tr>` nodes in the DOM simultaneously → browser UI thread blocks → page freezes. The table has no pagination controls and no virtual scrolling.
+
+**Fix:** Paginate the recipients sub-resource on the backend (`GET /campaigns/:id/recipients?page=1&limit=50`) and add pagination controls to `RecipientTable`, or use `@tanstack/react-virtual` to render only visible rows:
+
+```tsx
+// Option A — server-side pagination
+const { data } = useQuery({
+  queryKey: ['campaign-recipients', id, page],
+  queryFn: () => campaignsApi.getRecipients(id, { page, limit: 50 }),
+});
+
+// Option B — virtual scroll (client-side, avoids extra API)
+const rowVirtualizer = useVirtualizer({
+  count: recipients.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 45,
+});
+```
+
+---
+
+### 5.2 Stats Polling Every 2 Seconds — No Backoff or Ceiling
+
+```ts
+// useCampaignStats.ts
+refetchInterval: campaignStatus === 'sending' ? 2000 : false,
+```
+
+With 1,000 concurrent users viewing a sending campaign: **30,000 requests/minute** to `/campaigns/:id/stats`. There is no upper bound on how long the poll runs, no backoff, and no check for page visibility.
+
+**Fix:** Stop polling when tab is backgrounded, increase the interval, and cap the total poll duration. Long-term, replace polling with Server-Sent Events (SSE):
+
+```ts
+// Short-term: controlled polling
+refetchInterval: campaignStatus === 'sending' ? 5000 : false,
+refetchIntervalInBackground: false,  // stops when tab is hidden
+
+// Long-term: SSE push from the send worker
+const eventSource = new EventSource(`/api/v1/campaigns/${id}/progress`);
+eventSource.onmessage = (e) => queryClient.setQueryData(['campaign-stats', id], JSON.parse(e.data));
+```
+
+---
+
+### 5.3 Recipient Checkbox List — No Search, No Virtual Scroll
+
+```tsx
+// CampaignForm.tsx
+<div className="border ... max-h-48 overflow-y-auto">
+  {recipients.map((r) => ( <label> <input type="checkbox" /> </label> ))}
+</div>
+```
+
+`useRecipients(page=1, limit=100)` loads 100 recipients into a fixed-height scrollbox with no search or filter. Directly mirrors the backend problem (SCALABLE.md §2.3): sending 100K recipient IDs in a JSON body is infeasible. The UI has no mechanism for segment/tag-based selection.
+
+**Fix:** Replace the checkbox list with a segment/tag selector that mirrors the backend targeting model, plus a search input for manual selection:
+
+```tsx
+// Replace recipientIds[] with segmentId
+<select {...register('segmentId')}>
+  {segments.map(s => <option key={s.id} value={s.id}>{s.name} ({s.count})</option>)}
+</select>
+
+// If keeping manual selection: add debounced search
+const [search, setSearch] = useState('');
+const filtered = useMemo(
+  () => recipients.filter(r => r.name.toLowerCase().includes(search.toLowerCase())),
+  [recipients, search],
+);
+```
+
+---
+
+### 5.4 No `staleTime` — Unnecessary Refetches on Every Navigation
+
+All query hooks (`useCampaigns`, `useCampaign`, `useCampaignStats`, `useRecipients`) use the default `staleTime: 0`. Every component mount and every tab-focus triggers an immediate background refetch, even if the data is seconds old.
+
+**Fix:** Set appropriate `staleTime` per query type:
+
+```ts
+// useCampaigns.ts — list changes rarely
+useQuery({ ..., staleTime: 30_000 })
+
+// useCampaign.ts — details change on user action only
+useQuery({ ..., staleTime: 60_000 })
+
+// useCampaignStats.ts — already polls during send; staleTime irrelevant
+// useRecipients.ts — recipient list is effectively static
+useQuery({ ..., staleTime: 5 * 60_000 })
+```
+
+---
+
+### 5.5 Pagination State Lost on Back-Navigation
+
+```tsx
+// CampaignsPage.tsx
+const [page, setPage] = useState(1);  // reset to 1 on every mount
+```
+
+A user on page 5 who navigates to a campaign detail and returns is sent back to page 1. At scale with hundreds of campaigns across many pages, this is a significant UX regression.
+
+**Fix:** Persist page in the URL query string:
+
+```tsx
+const [searchParams, setSearchParams] = useSearchParams();
+const page = Number(searchParams.get('page') ?? '1');
+const setPage = (p: number) => setSearchParams({ page: String(p) });
+```
+
+---
+
+### 5.6 No Code Splitting — Full Bundle on First Load
+
+All pages are imported eagerly in `App.tsx`. The entire application bundle (including campaign detail, form, recipient table) is downloaded even when the user lands on the login page.
+
+**Fix:** Lazy-load route components:
+
+```tsx
+// App.tsx
+const CampaignsPage     = lazy(() => import('@/pages/Campaigns/CampaignsPage'));
+const CampaignDetailPage = lazy(() => import('@/pages/CampaignDetail/CampaignDetailPage'));
+const NewCampaignPage   = lazy(() => import('@/pages/NewCampaign/NewCampaignPage'));
+
+<Suspense fallback={<PageSkeleton />}>
+  <Routes> ... </Routes>
+</Suspense>
+```
+
+---
+
+### 5.7 Redundant Query Invalidation After Send
+
+```ts
+// useSendCampaign.ts
+onSuccess: (updated) => {
+  queryClient.setQueryData(['campaign', id], updated);   // ← sets cache
+  queryClient.invalidateQueries({ queryKey: ['campaign', id] }); // ← immediately marks stale → refetch
+```
+
+`setQueryData` is overwritten by `invalidateQueries` on the very next tick, making the optimistic set a no-op and causing an extra network request.
+
+**Fix:** Use `setQueryData` alone for the immediate update, skip the redundant invalidation of the same key:
+
+```ts
+onSuccess: (updated) => {
+  queryClient.setQueryData(['campaign', id], updated);
+  // only invalidate the list — detail is already fresh
+  queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+  queryClient.invalidateQueries({ queryKey: ['campaign-stats', id] });
+},
+```
+
+---
+
+### 5.8 `window.confirm()` for Destructive Actions
+
+```tsx
+if (!window.confirm('Send this campaign now? This cannot be undone.')) return;
+```
+
+The native browser `confirm` dialog is synchronous, blocks the JS thread, cannot be styled, and on some mobile browsers is suppressed entirely when triggered inside async callbacks.
+
+**Fix:** Replace with a controlled modal component:
+
+```tsx
+const [confirmOpen, setConfirmOpen] = useState(false);
+
+<ConfirmModal
+  open={confirmOpen}
+  title="Send Campaign"
+  description="This will send to all recipients immediately and cannot be undone."
+  onConfirm={() => { send(); setConfirmOpen(false); }}
+  onCancel={() => setConfirmOpen(false)}
+/>
+```
+
+---
+
+### 5.9 No React Error Boundary
+
+No `ErrorBoundary` component wraps any route or subtree. An unhandled render error (e.g. a malformed API response causing a `.map()` on `undefined`) crashes the entire application with a blank white screen and no recovery path.
+
+**Fix:** Wrap each route in an error boundary:
+
+```tsx
+<ErrorBoundary fallback={<ErrorPage />}>
+  <CampaignDetailPage />
+</ErrorBoundary>
+```
+
+---
+
+## 6. Priority Summary
 
 | # | Problem | Impact | Urgency |
 |---|---|---|---|
@@ -223,7 +427,16 @@ All reads (stats, campaign lists, recipient lookups) and all writes (send worker
 | 7 | Offset pagination on campaigns | Slow at page 500+ | **Medium** |
 | 8 | No unsubscribe flow | Legal / deliverability risk | **Medium** |
 | 9 | No read replicas / connection pooling | DB saturation under sustained load | **Low (infra)** |
+| 10 | `RecipientTable` no virtualization | Browser freeze at 10K+ recipients | **Critical (FE)** |
+| 11 | Stats polling 2s, no backoff | 30K req/min at 1K concurrent users | **High (FE)** |
+| 12 | Recipient checkbox list, no search | Unusable at 1K+ recipients | **High (FE)** |
+| 13 | No `staleTime` on queries | Unnecessary refetches on every navigation | **Medium (FE)** |
+| 14 | Pagination state lost on back-navigation | UX regression at large datasets | **Medium (FE)** |
+| 15 | No code splitting | Large initial bundle, slow TTI | **Medium (FE)** |
+| 16 | Redundant query invalidation after send | Extra network request per send action | **Low (FE)** |
+| 17 | `window.confirm` for destructive actions | Broken UX on mobile | **Low (FE)** |
+| 18 | No React Error Boundary | Full app crash on any render error | **Medium (FE)** |
 
 ---
 
-*Analysis version: 1.1 — last updated 2026-04-03*
+*Analysis version: 1.2 — last updated 2026-04-04*
