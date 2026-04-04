@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import { useCampaigns } from '@/hooks/useCampaigns';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -11,7 +10,9 @@ import { ApiError } from '@/types/api';
 
 export default function CampaignsPage() {
   const navigate = useNavigate();
-  const [page, setPage] = useState(1);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const page = Number(searchParams.get('page') ?? '1');
+  const setPage = (p: number) => setSearchParams({ page: String(p) }, { replace: true });
   const { data, isLoading, isError, error } = useCampaigns({ page, limit: 20 });
   const { user, refreshToken, logout } = useAuthStore();
 
@@ -108,14 +109,14 @@ export default function CampaignsPage() {
                 </p>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => setPage((p) => p - 1)}
+                    onClick={() => setPage(page - 1)}
                     disabled={page === 1}
                     className="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     Previous
                   </button>
                   <button
-                    onClick={() => setPage((p) => p + 1)}
+                    onClick={() => setPage(page + 1)}
                     disabled={page >= data.meta.totalPages}
                     className="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
