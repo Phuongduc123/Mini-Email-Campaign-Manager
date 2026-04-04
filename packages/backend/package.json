@@ -9,7 +9,9 @@
     "migrate": "ts-node src/database/migrate.ts",
     "test": "jest",
     "worker": "ts-node src/workers/campaign.worker.ts",
-    "worker:prod": "node dist/workers/campaign.worker.js"
+    "worker:prod": "node dist/workers/campaign.worker.js",
+    "lint": "eslint 'src/**/*.ts'",
+    "lint:fix": "eslint 'src/**/*.ts' --fix"
   },
   "jest": {
     "preset": "ts-jest",
@@ -45,6 +47,9 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.11.5",
     "@types/swagger-ui-express": "^4.1.8",
+    "@typescript-eslint/eslint-plugin": "6",
+    "@typescript-eslint/parser": "6",
+    "eslint": "8",
     "jest": "^29.7.0",
     "nodemon": "^3.0.3",
     "ts-jest": "^29.1.2",
