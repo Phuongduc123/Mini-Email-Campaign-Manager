@@ -26,6 +26,7 @@ export async function executeSend(campaignId: number): Promise<void> {
   logger.info({ event: 'campaign.send.executing', campaignId }, 'Send execution started');
 
   try {
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       // Fetch next batch of pending rows, skipping unsubscribed recipients
       const batch = await CampaignRecipient.findAll({

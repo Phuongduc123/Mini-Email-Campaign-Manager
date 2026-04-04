@@ -39,6 +39,7 @@ async function processCampaignSend(job: Job<CampaignSendJobData>): Promise<void>
 
   logger.info({ event: 'worker.send.started', campaignId, jobId: job.id }, 'Worker processing campaign send');
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const batch = await CampaignRecipient.findAll({
       where: { campaignId, status: 'pending' },
