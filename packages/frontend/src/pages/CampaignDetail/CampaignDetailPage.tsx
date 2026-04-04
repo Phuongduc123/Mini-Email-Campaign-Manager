@@ -10,6 +10,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { StatsBar } from '@/components/StatsBar';
 import { RecipientTable } from '@/components/RecipientTable';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { ConfirmModal } from '@/components/ConfirmModal';
 import { CampaignDetailSkeleton } from '@/components/LoadingSkeleton';
 import { ApiError } from '@/types/api';
 
@@ -28,17 +29,15 @@ export default function CampaignDetailPage() {
   const [showScheduleInput, setShowScheduleInput] = useState(false);
   const [scheduledAt, setScheduledAt] = useState('');
   const [scheduleValidationError, setScheduleValidationError] = useState('');
+  const [confirmAction, setConfirmAction] = useState<'send' | 'delete' | null>(null);
 
-  const handleSend = () => {
-    if (!window.confirm('Send this campaign now? This cannot be undone.')) return;
-    send();
-  };
+  const handleSend = () => setConfirmAction('send');
+  const handleDelete = () => setConfirmAction('delete');
 
-  const handleDelete = () => {
-    if (!window.confirm('Delete this campaign? This cannot be undone.')) return;
-    deleteCampaign(campaignId, {
-      onSuccess: () => navigate('/campaigns'),
-    });
+  const handleConfirm = () => {
+    if (confirmAction === 'send') send();
+    if (confirmAction === 'delete') deleteCampaign(campaignId, { onSuccess: () => navigate('/campaigns') });
+    setConfirmAction(null);
   };
 
   const handleScheduleSubmit = () => {
@@ -83,6 +82,19 @@ export default function CampaignDetailPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <ConfirmModal
+        open={confirmAction !== null}
+        title={confirmAction === 'send' ? 'Send Campaign' : 'Delete Campaign'}
+        description={
+          confirmAction === 'send'
+            ? 'Send this campaign to all recipients now? This cannot be undone.'
+            : 'Delete this campaign permanently? This cannot be undone.'
+        }
+        confirmLabel={confirmAction === 'send' ? 'Send Now' : 'Delete'}
+        danger={confirmAction === 'delete'}
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirmAction(null)}
+      />
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <Link to="/campaigns" className="text-sm text-gray-500 hover:text-gray-700">
           ← Back to Campaigns
