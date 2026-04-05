@@ -108,11 +108,98 @@ Frontend — copy `packages/frontend/.env.example`: `VITE_API_URL` (default: `ht
 - **Error handling**: throw `AppError` from `shared/utils/errors.ts` — the global error middleware catches it and formats the response with `requestId`
 - **Validation**: use `validate(schema)` middleware factory; never validate inside controllers/services
 - **Path alias**: frontend uses `@/` mapped to `src/`
-- **Auth**: JWT access token + refresh token flow; refresh tokens stored in `refresh_tokens` table
-- **Send simulation**: `modules/campaigns/send.service.ts` randomly marks recipients sent/failed — this is the placeholder for real email delivery
+- **Auth**: JWT access token (15 min) + refresh token (7 days) flow; refresh tokens SHA-256 hashed and stored in `refresh_tokens` table; rotated on every use (single-use)
+- **Send simulation**: `modules/campaigns/send.service.ts` randomly marks recipients sent/failed — placeholder for real email delivery
+- **Worker**: `campaign.worker.ts` is a separate process (BullMQ); run with `yarn workspace backend worker`
 
-## Known Scalability Limitations (documented in SCALABLE.md)
+## API Response Shapes
 
-- Email sending is synchronous in-process (no queue) — data loss on crash
-- `/recipients` has no pagination — will OOM with large datasets
-- Campaign stats are aggregated live on every request — will degrade at scale
+Use the helpers from `shared/utils/response.ts` — never write raw `res.json()` in controllers:
+
+```typescript
+sendSuccess(res, data)       // 200  { data }
+sendCreated(res, data)       // 201  { data }
+sendDeleted(res)             // 200  { data: null }
+sendPaginated(res, result)   // 200  { data: [...], meta: { total, page, limit, totalPages } }
+```
+
+The `/send` endpoint is the only exception — uses `res.status(202).json({ data: null })` directly.
+
+**Error response shape** (thrown via `AppError`, formatted by global handler):
+```json
+{ "error": "CAMPAIGN_NOT_DRAFT", "message": "...", "statusCode": 409, "requestId": "req_abc" }
+```
+`details` array only present on `422 VALIDATION_ERROR`. Success responses never include `error`, `message`, `status`, or `code` fields.
+
+## Error Codes Reference
+
+| Code | Status | Trigger |
+|------|--------|---------|
+| `VALIDATION_ERROR` | 422 | Zod schema rejected request body |
+| `UNAUTHORIZED` | 401 | Missing or invalid JWT |
+| `FORBIDDEN` | 403 | Resource belongs to another user |
+| `NOT_FOUND` | 404 | Resource does not exist |
+| `CONFLICT` | 409 | Duplicate resource (e.g. email already registered) |
+| `CAMPAIGN_NOT_DRAFT` | 409 | Edit/delete attempted on non-draft campaign |
+| `CAMPAIGN_NOT_SENDABLE` | 409 | Send attempted on already-sent/sending campaign |
+| `RECIPIENT_EMAIL_EXISTS` | 409 | Duplicate recipient email |
+| `INVALID_CREDENTIALS` | 401 | Wrong email or password |
+| `INTERNAL_ERROR` | 500 | Unhandled exception — stack logged, generic message returned |
+
+## Campaign Status Transitions
+
+```
+draft → scheduled   (via POST /campaigns/:id/schedule)
+draft → sending     (via POST /campaigns/:id/send)
+scheduled → sending (via POST /campaigns/:id/send)
+sending → sent      (worker completes all batches)
+sending → draft     (worker exhausts all retries — permanent failure)
+```
+
+**Rules enforced in `campaign.service.ts` (not controller, not DB):**
+- Only `draft` campaigns can be edited or deleted
+- Only `draft` or `scheduled` campaigns can be sent
+- `scheduledAt` must be a future timestamp
+- Stats rates: `open_rate = opened / sent`, `send_rate = sent / total` (divide-by-zero returns 0)
+
+## Database Indexes
+
+All migrations live in `packages/backend/src/database/migrations/`. Current indexes:
+
+| Index | Table | Purpose |
+|-------|-------|---------|
+| `UNIQUE (email)` | users | Login lookup, duplicate check |
+| `idx_campaigns_created_by` | campaigns | List campaigns by owner |
+| `idx_campaigns_status` | campaigns | Filter by status |
+| `idx_campaigns_created_by_status` | campaigns | Combined owner + status filter (single scan) |
+| `idx_campaigns_created_by_id` | campaigns | Pagination `ORDER BY id DESC` scoped to owner |
+| `UNIQUE (email)` | recipients | Duplicate email check on create |
+| `idx_recipients_active` *(partial)* | recipients | Worker JOIN `WHERE unsubscribed_at IS NULL` — active rows only |
+| `idx_cr_campaign_status` | campaign_recipients | Worker batch loop + stats aggregation |
+| `idx_cr_pending_work` *(partial)* | campaign_recipients | Worker `WHERE status = 'pending'` — excludes completed rows |
+| `idx_cr_recipient_id` | campaign_recipients | Reverse FK lookup by recipient |
+| `idx_cr_opened_at` *(partial)* | campaign_recipients | `countOpened()` — skips ~65% of never-opened rows |
+| `UNIQUE (token_hash)` | refresh_tokens | Token lookup on every refresh |
+| `idx_refresh_tokens_user_id` | refresh_tokens | Revoke all tokens on logout/delete |
+
+When adding new queries that filter or sort on unlisted columns, check if a new index is needed.
+
+## Logging Rules
+
+**What to log:** IDs, counts, durations, event names, status codes.
+
+**Never log:**
+- JWT tokens or refresh tokens (plain-text logs = account takeover)
+- `password` or `password_hash`
+- Full email body content (PII)
+- Raw recipient email lists (log `count` instead)
+- Raw validation errors on auth fields (may echo a submitted password)
+
+Log levels: `error` = unhandled/infra failure · `warn` = expected business failure · `info` = normal lifecycle · `debug` = high-frequency internals (disabled in production).
+
+## Known Scalability Limitations
+
+- `/recipients` has no server-side search — will degrade with large datasets
+- Campaign stats use denormalized counters (`sent_count`, `failed_count` on `campaigns` table) — O(1) reads
+- Cursor-based pagination is the documented upgrade path (repository layer change only)
+- `campaign_recipients` will need `FILLFACTOR = 70` + autovacuum tuning at high row counts (see DATABASE.md §6.5)

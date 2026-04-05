@@ -161,41 +161,61 @@ CREATE TABLE campaign_recipients (
 ### 3.1 Index Definitions
 
 ```sql
--- users
-CREATE UNIQUE INDEX uq_users_email_idx
-    ON users (email);
--- Already enforced by the UNIQUE constraint; explicit for clarity.
+-- ── users ────────────────────────────────────────────────────────────────────
+-- Implicit from UNIQUE constraint — login lookup: WHERE email = ?
+CREATE UNIQUE INDEX uq_users_email_idx ON users (email);
 
--- campaigns
+-- ── campaigns ────────────────────────────────────────────────────────────────
+-- Hot path: every "list my campaigns" request filters by owner
 CREATE INDEX idx_campaigns_created_by
     ON campaigns (created_by);
 
+-- Low-cardinality filter (draft/scheduled/sending/sent); useful when combined
+-- with created_by in the composite index below
 CREATE INDEX idx_campaigns_status
     ON campaigns (status);
 
-CREATE INDEX idx_campaigns_scheduled_at
-    ON campaigns (scheduled_at)
-    WHERE scheduled_at IS NOT NULL AND status = 'scheduled';
+-- Composite: serves WHERE created_by = ? AND status = ? in a single index scan
+-- More efficient than PostgreSQL combining the two single-column indexes above
+CREATE INDEX idx_campaigns_created_by_status
+    ON campaigns (created_by, status);
 
--- recipients
-CREATE UNIQUE INDEX uq_recipients_email_idx
-    ON recipients (email);
+-- Covers ORDER BY id DESC pagination scans scoped to one user.
+-- Without this, Postgres sorts after filtering; with 2 000+ campaigns per user it matters.
+CREATE INDEX idx_campaigns_created_by_id
+    ON campaigns (created_by, id);
 
-CREATE INDEX idx_recipients_unsubscribed
-    ON recipients (unsubscribed_at)
-    WHERE unsubscribed_at IS NOT NULL;
+-- ── recipients ───────────────────────────────────────────────────────────────
+-- Implicit from UNIQUE constraint — duplicate-email check on create
+CREATE UNIQUE INDEX uq_recipients_email_idx ON recipients (email);
 
--- campaign_recipients  (this is the hot table at scale)
+-- Partial index covering only active (non-unsubscribed) recipients.
+-- Used by the send worker JOIN: r.id = cr.recipient_id WHERE r.unsubscribed_at IS NULL
+-- Keeps index size proportional to active recipients, not the full table.
+CREATE INDEX idx_recipients_active
+    ON recipients (id)
+    WHERE unsubscribed_at IS NULL;
+
+-- ── campaign_recipients  (hot table — updated on every send batch) ────────────
+-- Primary key (campaign_id, recipient_id) already covers campaign_id-first lookups.
+
+-- Composite for send worker batch loop + status-based stats aggregation
 CREATE INDEX idx_cr_campaign_status
     ON campaign_recipients (campaign_id, status);
 
-CREATE INDEX idx_cr_recipient_id
-    ON campaign_recipients (recipient_id);
-
+-- Partial: only 'pending' rows — the majority of rows are 'sent'/'failed' after
+-- a campaign completes; keeping them out of the index reduces bloat significantly.
 CREATE INDEX idx_cr_pending_work
     ON campaign_recipients (campaign_id)
     WHERE status = 'pending';
 
+-- FK reverse-lookup: "which campaigns did this recipient receive?"
+CREATE INDEX idx_cr_recipient_id
+    ON campaign_recipients (recipient_id);
+
+-- Partial: open-rate stats — countOpened() query:
+-- WHERE campaign_id = ? AND opened_at IS NOT NULL
+-- Skips the ~65% of rows where opened_at IS NULL (never opened).
 CREATE INDEX idx_cr_opened_at
     ON campaign_recipients (campaign_id, opened_at)
     WHERE opened_at IS NOT NULL;
@@ -207,14 +227,26 @@ CREATE INDEX idx_cr_opened_at
 
 | Index | Table | Query it serves | Why it matters |
 |---|---|---|---|
-| `idx_campaigns_created_by` | campaigns | `WHERE created_by = $userId` — list all campaigns for the logged-in user | Without this, every campaign list request is a full table scan. At thousands of campaigns, it degrades fast |
-| `idx_campaigns_status` | campaigns | `WHERE status = 'scheduled'` — scheduler polling for due campaigns | The scheduler runs on a cron interval; a seq-scan here blocks everything |
-| `idx_campaigns_scheduled_at` *(partial)* | campaigns | `WHERE scheduled_at <= NOW() AND status = 'scheduled'` | Partial index only covers actionable rows, keeping it tiny and fast. Full index would waste space indexing NULLs |
-| `idx_cr_campaign_status` | campaign_recipients | `WHERE campaign_id = $id AND status = 'pending'` — send worker batch fetch; also drives stats aggregation | Composite — satisfies both the send worker (fetches pending rows) and stats queries (count by status) in a single index scan |
-| `idx_cr_recipient_id` | campaign_recipients | `WHERE recipient_id = $id` — "which campaigns has this recipient received?" | Needed for reverse lookups. The composite PK covers `campaign_id` first, making `recipient_id`-first lookups a full scan without this index |
-| `idx_cr_pending_work` *(partial)* | campaign_recipients | Send worker `WHERE campaign_id = $id AND status = 'pending'` | Partial index skips `sent` and `failed` rows (the majority once a campaign completes), so the index stays small as the table grows to millions of rows |
-| `idx_cr_opened_at` *(partial)* | campaign_recipients | `WHERE campaign_id = $id AND opened_at IS NOT NULL` — open-rate stats | Partial index avoids indexing the large majority of rows where `opened_at IS NULL` |
-| `idx_recipients_unsubscribed` *(partial)* | recipients | Compliance reporting — list all unsubscribed recipients | Filters the ~5–15% of unsubscribed rows; avoids indexing the active majority |
+| `uq_users_email_idx` | users | `WHERE email = ?` — login, register duplicate check | Without this, every login is a full table scan |
+| `idx_campaigns_created_by` | campaigns | `WHERE created_by = $userId` — list campaigns | Base filter for every campaign list request |
+| `idx_campaigns_status` | campaigns | `WHERE status = 'scheduled'` — scheduler polling | Low cardinality (4 values); useful standalone when scanning across all users |
+| `idx_campaigns_created_by_status` *(composite)* | campaigns | `WHERE created_by = ? AND status = ?` | Single index scan vs. PostgreSQL merging two indexes — faster for filtered list with status param |
+| `idx_campaigns_created_by_id` *(composite)* | campaigns | `WHERE created_by = ? ORDER BY id DESC` | Covers paginated list queries without a separate sort step |
+| `uq_recipients_email_idx` | recipients | `WHERE email = ?` — duplicate email check | Required on every recipient create |
+| `idx_recipients_active` *(partial)* | recipients | Worker JOIN: `r.id = cr.recipient_id WHERE r.unsubscribed_at IS NULL` | Partial index on active recipients only; scales well as unsubscribe list grows |
+| `idx_cr_campaign_status` *(composite)* | campaign_recipients | `WHERE campaign_id = ? AND status = 'pending'` — worker batch; stats count | Serves both the send loop and stats aggregation in one scan |
+| `idx_cr_pending_work` *(partial)* | campaign_recipients | Send worker batch `WHERE campaign_id = ? AND status = 'pending'` | Excludes completed rows (majority after send); index stays small as table grows to millions |
+| `idx_cr_recipient_id` | campaign_recipients | `WHERE recipient_id = ?` — reverse FK lookup | PK is `(campaign_id, recipient_id)`; without this, recipient-first lookups are full scans |
+| `idx_cr_opened_at` *(partial)* | campaign_recipients | `countOpened`: `WHERE campaign_id = ? AND opened_at IS NOT NULL` | Skips ~65% of rows (never opened); keeps open-rate queries O(opens) not O(all recipients) |
+
+### 3.3 Migration History
+
+| Migration file | Indexes added |
+|---|---|
+| `20240101000002-create-campaigns.ts` | `idx_campaigns_created_by`, `idx_campaigns_status` |
+| `20240101000004-create-campaign-recipients.ts` | `idx_cr_campaign_id`, `idx_cr_recipient_id`, `idx_cr_campaign_status` |
+| `20240101000005-create-refresh-tokens.ts` | `idx_refresh_tokens_user_id`, `idx_refresh_tokens_token_hash` |
+| `20240101000006-add-performance-indexes.ts` | `idx_campaigns_created_by_status`, `idx_campaigns_created_by_id`, `idx_recipients_active`, `idx_cr_opened_at` |
 
 ---
 
@@ -390,4 +422,4 @@ ALTER TABLE campaign_recipients SET (fillfactor = 70, autovacuum_vacuum_scale_fa
 
 ---
 
-*Schema version: 1.0 — last updated 2026-03-31*
+*Schema version: 1.1 — last updated 2026-04-05*
