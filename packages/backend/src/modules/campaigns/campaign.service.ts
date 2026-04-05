@@ -7,7 +7,7 @@ import {
 } from './campaign.schema';
 import { Campaign } from '../../database/models/Campaign';
 import { CampaignRecipient } from '../../database/models/CampaignRecipient';
-import { CursorPaginatedResult } from '../../shared/types';
+import { PaginatedResult } from '../../shared/types';
 import { NotFoundError, ConflictError, ForbiddenError, BadRequestError } from '../../shared/utils/errors';
 import { logger } from '../../config/logger';
 import { getCampaignQueue } from '../../queue';
@@ -15,7 +15,7 @@ import { getCampaignQueue } from '../../queue';
 export class CampaignService {
   constructor(private readonly campaignRepository: CampaignRepository) {}
 
-  async list(userId: number, query: ListCampaignQuery): Promise<CursorPaginatedResult<Campaign>> {
+  async list(userId: number, query: ListCampaignQuery): Promise<PaginatedResult<Campaign>> {
     return this.campaignRepository.findAll(userId, query);
   }
 

@@ -6,7 +6,7 @@ export const createRecipientSchema = z.object({
 });
 
 export const listRecipientQuerySchema = z.object({
-  cursor: z.string().optional(),
+  page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 

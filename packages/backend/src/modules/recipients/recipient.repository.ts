@@ -1,34 +1,25 @@
-import { Op } from 'sequelize';
 import { Recipient } from '../../database/models/Recipient';
-import { CursorPaginatedResult } from '../../shared/types';
+import { PaginatedResult } from '../../shared/types';
 import { CreateRecipientDto, ListRecipientQuery } from './recipient.schema';
 
-function encodeCursor(id: number): string {
-  return Buffer.from(String(id)).toString('base64');
-}
-
-function decodeCursor(cursor: string): number {
-  return parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10);
-}
-
 export class RecipientRepository {
-  async findAll(query: ListRecipientQuery): Promise<CursorPaginatedResult<Recipient>> {
-    const { cursor, limit } = query;
+  async findAll(query: ListRecipientQuery): Promise<PaginatedResult<Recipient>> {
+    const { page, limit } = query;
+    const offset = (page - 1) * limit;
 
-    const where: Record<string, unknown> = {};
-    if (cursor) where['id'] = { [Op.lt]: decodeCursor(cursor) };
-
-    const rows = await Recipient.findAll({
-      where,
-      limit: limit + 1,
+    const { rows, count: total } = await Recipient.findAndCountAll({
+      limit,
+      offset,
       order: [['id', 'DESC']],
     });
 
-    const hasMore = rows.length > limit;
-    const items = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore ? encodeCursor(items[items.length - 1].id) : null;
-
-    return { items, nextCursor, hasMore };
+    return {
+      items: rows,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findById(id: number): Promise<Recipient | null> {
