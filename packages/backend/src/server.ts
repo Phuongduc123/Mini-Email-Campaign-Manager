@@ -1,12 +1,15 @@
 import { createApp } from './app';
 import { config } from './config';
 import { connectDatabase } from './config/database';
+import { startCampaignScheduler } from './modules/campaigns/campaign.scheduler';
 
 // Initialize models & associations
 import './database/models/index';
 
 const startServer = async (): Promise<void> => {
   await connectDatabase();
+
+  startCampaignScheduler();
 
   const app = createApp();
 

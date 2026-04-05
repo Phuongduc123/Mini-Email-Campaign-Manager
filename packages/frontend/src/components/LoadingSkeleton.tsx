@@ -54,6 +54,18 @@ export function CampaignDetailSkeleton() {
   );
 }
 
+export function PageSkeleton() {
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="space-y-3 w-64">
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-3/4" />
+        <Skeleton className="h-4 w-1/2" />
+      </div>
+    </div>
+  );
+}
+
 export function FormSkeleton() {
   return (
     <div className="space-y-5">

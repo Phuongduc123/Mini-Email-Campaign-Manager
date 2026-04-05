@@ -21,4 +21,12 @@ export const config = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN ?? '7d', // refresh token — long-lived
     refreshExpiresInMs: 7 * 24 * 60 * 60 * 1000,            // 7 days in ms for DB expiresAt
   },
+  redis: {
+    host: process.env.REDIS_HOST ?? 'localhost',
+    port: parseInt(process.env.REDIS_PORT ?? '6380', 10),
+    password: process.env.REDIS_PASSWORD,
+  },
+  worker: {
+    concurrency: parseInt(process.env.WORKER_CONCURRENCY ?? '5', 10),
+  },
 } as const;

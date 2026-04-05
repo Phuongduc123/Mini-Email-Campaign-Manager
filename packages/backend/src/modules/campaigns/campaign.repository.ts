@@ -10,25 +10,31 @@ export class CampaignRepository {
     createdBy: number,
     query: ListCampaignQuery,
   ): Promise<PaginatedResult<Campaign>> {
-    const { page, limit, status } = query;
+    const { page, limit, status, search } = query;
     const offset = (page - 1) * limit;
 
     const where: Record<string, unknown> = { createdBy };
     if (status) where['status'] = status;
+    if (search) {
+      where[Op.or as unknown as string] = [
+        { name: { [Op.iLike]: `%${search}%` } },
+        { subject: { [Op.iLike]: `%${search}%` } },
+      ];
+    }
 
-    const { count, rows } = await Campaign.findAndCountAll({
+    const { rows, count: total } = await Campaign.findAndCountAll({
       where,
       limit,
       offset,
-      order: [['created_at', 'DESC']],
+      order: [['id', 'DESC']],
     });
 
     return {
       items: rows,
-      total: count,
+      total,
       page,
       limit,
-      totalPages: Math.ceil(count / limit),
+      totalPages: Math.ceil(total / limit),
     };
   }
 
@@ -89,26 +95,9 @@ export class CampaignRepository {
     return campaign.update({ status });
   }
 
-  async getStats(campaignId: number): Promise<{
-    total: number;
-    sent: number;
-    failed: number;
-    opened: number;
-    open_rate: number;
-    send_rate: number;
-  }> {
-    const [total, sent, failed, opened] = await Promise.all([
-      CampaignRecipient.count({ where: { campaignId } }),
-      CampaignRecipient.count({ where: { campaignId, status: 'sent' } }),
-      CampaignRecipient.count({ where: { campaignId, status: 'failed' } }),
-      CampaignRecipient.count({
-        where: { campaignId, openedAt: { [Op.ne]: null } },
-      }),
-    ]);
-
-    const send_rate = total > 0 ? sent / total : 0;
-    const open_rate = sent > 0 ? opened / sent : 0;
-
-    return { total, sent, failed, opened, open_rate, send_rate };
+  async countOpened(campaignId: number): Promise<number> {
+    return CampaignRecipient.count({
+      where: { campaignId, openedAt: { [Op.ne]: null } },
+    });
   }
 }

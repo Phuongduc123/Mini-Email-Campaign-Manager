@@ -6,9 +6,11 @@ import {
   ListCampaignQuery,
 } from './campaign.schema';
 import { Campaign } from '../../database/models/Campaign';
+import { CampaignRecipient } from '../../database/models/CampaignRecipient';
 import { PaginatedResult } from '../../shared/types';
 import { NotFoundError, ConflictError, ForbiddenError, BadRequestError } from '../../shared/utils/errors';
 import { logger } from '../../config/logger';
+import { getCampaignQueue } from '../../queue';
 
 export class CampaignService {
   constructor(private readonly campaignRepository: CampaignRepository) {}
@@ -84,18 +86,29 @@ export class CampaignService {
       throw new BadRequestError('scheduledAt must be a future timestamp.');
     }
 
-    const updated = await campaign.update({ status: 'scheduled', scheduledAt });
-    logger.info(
-      { event: 'campaign.scheduled', campaignId: id, userId, scheduledAt },
-      'Campaign scheduled',
+    // Snapshot totalRecipients at schedule time
+    const totalRecipients = await CampaignRecipient.count({ where: { campaignId: id } });
+    await campaign.update({ status: 'scheduled', scheduledAt, totalRecipients });
+
+    // Enqueue a BullMQ delayed job — fires automatically at scheduledAt
+    const delay = scheduledAt.getTime() - Date.now();
+    await getCampaignQueue().add(
+      'send',
+      { campaignId: id },
+      {
+        jobId: `campaign-${id}`,  // idempotent: second call won't create a duplicate
+        delay,
+      },
     );
-    return updated;
+
+    logger.info(
+      { event: 'campaign.scheduled', campaignId: id, userId, scheduledAt, delay },
+      'Campaign scheduled — delayed job enqueued',
+    );
+    return (await this.campaignRepository.findById(id))!;
   }
 
   async send(id: number, userId: number): Promise<Campaign> {
-    // Imported here to avoid circular deps at module load time
-    const { executeSend } = await import('./send.service');
-
     const campaign = await this.getById(id, userId);
 
     if (campaign.status !== 'draft' && campaign.status !== 'scheduled') {
@@ -105,20 +118,23 @@ export class CampaignService {
       );
     }
 
-    const updated = await this.campaignRepository.updateStatus(campaign, 'sending');
-    logger.info({ event: 'campaign.send.started', campaignId: id, userId }, 'Campaign send initiated');
+    // Snapshot totalRecipients and flip status atomically before enqueuing
+    const totalRecipients = await CampaignRecipient.count({ where: { campaignId: id } });
+    await this.campaignRepository.updateStatus(campaign, 'sending');
+    await Campaign.update({ totalRecipients }, { where: { id } });
 
-    // Fire and forget — do NOT await. Return 202 immediately.
-    setImmediate(() => {
-      executeSend(id).catch((err: Error) => {
-        logger.error(
-          { event: 'campaign.send.error', campaignId: id, err: err.message },
-          'Campaign send failed unexpectedly',
-        );
-      });
-    });
+    // Enqueue immediately — worker picks it up and does the actual send
+    await getCampaignQueue().add(
+      'send',
+      { campaignId: id },
+      {
+        jobId: `campaign-${id}`,  // idempotent
+      },
+    );
 
-    return updated;
+    logger.info({ event: 'campaign.send.enqueued', campaignId: id, userId }, 'Campaign send job enqueued');
+
+    return (await this.campaignRepository.findById(id))!;
   }
 
   async getStats(
@@ -132,7 +148,19 @@ export class CampaignService {
     open_rate: number;
     send_rate: number;
   }> {
-    await this.getById(id, userId); // ownership check
-    return this.campaignRepository.getStats(id);
+    const campaign = await this.getById(id, userId); // ownership check + fetches counters
+
+    // sentCount / failedCount / totalRecipients are denormalized — O(1) reads
+    const total = campaign.totalRecipients;
+    const sent = campaign.sentCount;
+    const failed = campaign.failedCount;
+
+    // opened still requires a live count (no denormalized column for opens yet)
+    const opened = await this.campaignRepository.countOpened(id);
+
+    const send_rate = total > 0 ? sent / total : 0;
+    const open_rate = sent > 0 ? opened / sent : 0;
+
+    return { total, sent, failed, opened, open_rate, send_rate };
   }
 }

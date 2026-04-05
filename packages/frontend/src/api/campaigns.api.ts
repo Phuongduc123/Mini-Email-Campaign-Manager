@@ -13,6 +13,7 @@ export interface ListCampaignsParams {
   page?: number;
   limit?: number;
   status?: CampaignStatus;
+  search?: string;
 }
 
 export const campaignsApi = {

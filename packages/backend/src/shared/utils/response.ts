@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { PaginatedResult } from '../types';
+import { PaginatedResult, CursorPaginatedResult } from '../types';
 
 /**
  * Standard API Response Shapes
@@ -24,5 +24,13 @@ export const sendPaginated = <T>(res: Response, result: PaginatedResult<T>): Res
   return res.status(200).json({
     data: items,
     meta: { total, page, limit, totalPages },
+  });
+};
+
+export const sendCursorPaginated = <T>(res: Response, result: CursorPaginatedResult<T>): Response => {
+  const { items, nextCursor, hasMore } = result;
+  return res.status(200).json({
+    data: items,
+    meta: { nextCursor, hasMore },
   });
 };

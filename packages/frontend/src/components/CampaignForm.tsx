@@ -1,3 +1,4 @@
+import { useState, useMemo } from 'react';
 import { useForm } from 'react-hook-form';
 import { CreateCampaignPayload } from '@/types/campaign';
 import { Recipient } from '@/types/recipient';
@@ -31,6 +32,17 @@ export function CampaignForm({
   });
 
   const selectedIds = watch('recipientIds') ?? [];
+  const [search, setSearch] = useState('');
+
+  const filteredRecipients = useMemo(
+    () =>
+      recipients.filter(
+        (r) =>
+          r.name.toLowerCase().includes(search.toLowerCase()) ||
+          r.email.toLowerCase().includes(search.toLowerCase()),
+      ),
+    [recipients, search],
+  );
 
   const toggleRecipient = (id: number) => {
     if (selectedIds.includes(id)) {
@@ -91,22 +103,42 @@ export function CampaignForm({
             No recipients available. Create some first.
           </p>
         ) : (
-          <div className="border border-gray-300 rounded-md max-h-48 overflow-y-auto divide-y divide-gray-100">
-            {recipients.map((r) => (
-              <label
-                key={r.id}
-                className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedIds.includes(r.id)}
-                  onChange={() => toggleRecipient(r.id)}
-                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                />
-                <span className="text-sm text-gray-800">{r.name}</span>
-                <span className="text-xs text-gray-500">{r.email}</span>
-              </label>
-            ))}
+          <div className="border border-gray-300 rounded-md overflow-hidden">
+            <div className="px-3 py-2 border-b border-gray-200 bg-gray-50">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by name or email..."
+                className="w-full bg-transparent text-sm focus:outline-none placeholder-gray-400"
+              />
+            </div>
+            <div className="max-h-48 overflow-y-auto divide-y divide-gray-100">
+              {filteredRecipients.length === 0 ? (
+                <p className="text-sm text-gray-400 px-3 py-3">No recipients match your search.</p>
+              ) : (
+                filteredRecipients.map((r) => (
+                  <label
+                    key={r.id}
+                    className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(r.id)}
+                      onChange={() => toggleRecipient(r.id)}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-800">{r.name}</span>
+                    <span className="text-xs text-gray-500">{r.email}</span>
+                  </label>
+                ))
+              )}
+            </div>
+            {recipients.length > 10 && (
+              <div className="px-3 py-1.5 border-t border-gray-100 bg-gray-50 text-xs text-gray-400">
+                {filteredRecipients.length} of {recipients.length} recipients
+              </div>
+            )}
           </div>
         )}
         {errors.recipientIds && (

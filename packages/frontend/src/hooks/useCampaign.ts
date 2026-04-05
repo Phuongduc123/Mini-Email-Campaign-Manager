@@ -6,5 +6,6 @@ export const useCampaign = (id: number) => {
     queryKey: ['campaign', id],
     queryFn: () => campaignsApi.getById(id),
     enabled: !!id,
+    staleTime: 60_000,
   });
 };

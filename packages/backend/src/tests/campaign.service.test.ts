@@ -13,9 +13,24 @@ jest.mock('../config/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-// Mock dynamic import for send.service to avoid actual DB calls
+// Mock send.service to avoid actual DB calls
 jest.mock('../modules/campaigns/send.service', () => ({
   executeSend: jest.fn().mockResolvedValue(undefined),
+}));
+
+// Mock CampaignRecipient.count (used inside schedule() and send())
+jest.mock('../database/models/CampaignRecipient', () => ({
+  CampaignRecipient: { count: jest.fn().mockResolvedValue(5) },
+}));
+
+// Mock Campaign.update (bulk update for totalRecipients in send())
+jest.mock('../database/models/Campaign', () => ({
+  Campaign: { update: jest.fn().mockResolvedValue([1]) },
+}));
+
+// Mock BullMQ queue
+jest.mock('../queue', () => ({
+  getCampaignQueue: jest.fn().mockReturnValue({ add: jest.fn().mockResolvedValue({ id: 'j1' }) }),
 }));
 
 function makeMockCampaign(overrides: Partial<Campaign> = {}): Campaign {
@@ -27,6 +42,9 @@ function makeMockCampaign(overrides: Partial<Campaign> = {}): Campaign {
     status: 'draft',
     scheduledAt: null,
     createdBy: 42,
+    totalRecipients: 0,
+    sentCount: 0,
+    failedCount: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     update: jest.fn().mockImplementation(function (this: Campaign, data: Partial<Campaign>) {
@@ -50,7 +68,8 @@ function makeRepo(campaignOverrides: Partial<Campaign> = {}): jest.Mocked<Campai
       campaign.status = status as Campaign['status'];
       return Promise.resolve(campaign);
     }),
-    getStats: jest.fn(),
+    replaceRecipients: jest.fn().mockResolvedValue(undefined),
+    countOpened: jest.fn().mockResolvedValue(0),
   } as unknown as jest.Mocked<CampaignRepository>;
 }
 
@@ -164,12 +183,12 @@ describe('CampaignService.schedule()', () => {
 });
 
 // ─── Bonus Test 4: Stats open_rate and send_rate calculation ─────────────────
+// getStats() reads denormalized counters from the campaign model (totalRecipients,
+// sentCount, failedCount) and calls repo.countOpened() for the live opened count.
 describe('CampaignService.getStats()', () => {
   it('returns 0 rates when total is 0', async () => {
-    const repo = makeRepo({ status: 'sent' });
-    repo.getStats.mockResolvedValue({
-      total: 0, sent: 0, failed: 0, opened: 0, open_rate: 0, send_rate: 0,
-    });
+    const repo = makeRepo({ status: 'sent', totalRecipients: 0, sentCount: 0, failedCount: 0 });
+    (repo.countOpened as jest.Mock).mockResolvedValue(0);
     const service = new CampaignService(repo);
 
     const stats = await service.getStats(CAMPAIGN_ID, USER_ID);
@@ -178,16 +197,12 @@ describe('CampaignService.getStats()', () => {
   });
 
   it('calculates correct rates', async () => {
-    const repo = makeRepo({ status: 'sent' });
-    repo.getStats.mockResolvedValue({
-      total: 100, sent: 80, failed: 20, opened: 40,
-      open_rate: 40 / 80,
-      send_rate: 80 / 100,
-    });
+    const repo = makeRepo({ status: 'sent', totalRecipients: 100, sentCount: 80, failedCount: 20 });
+    (repo.countOpened as jest.Mock).mockResolvedValue(40);
     const service = new CampaignService(repo);
 
     const stats = await service.getStats(CAMPAIGN_ID, USER_ID);
-    expect(stats.send_rate).toBeCloseTo(0.8);
-    expect(stats.open_rate).toBeCloseTo(0.5);
+    expect(stats.send_rate).toBeCloseTo(0.8);   // 80 / 100
+    expect(stats.open_rate).toBeCloseTo(0.5);   // 40 / 80
   });
 });

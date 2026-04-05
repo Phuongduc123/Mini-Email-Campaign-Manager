@@ -2,26 +2,23 @@ import { Recipient } from '../../database/models/Recipient';
 import { PaginatedResult } from '../../shared/types';
 import { CreateRecipientDto, ListRecipientQuery } from './recipient.schema';
 
-/**
- * Data-access layer for the recipients module.
- */
 export class RecipientRepository {
   async findAll(query: ListRecipientQuery): Promise<PaginatedResult<Recipient>> {
     const { page, limit } = query;
     const offset = (page - 1) * limit;
 
-    const { count, rows } = await Recipient.findAndCountAll({
+    const { rows, count: total } = await Recipient.findAndCountAll({
       limit,
       offset,
-      order: [['created_at', 'DESC']],
+      order: [['id', 'DESC']],
     });
 
     return {
       items: rows,
-      total: count,
+      total,
       page,
       limit,
-      totalPages: Math.ceil(count / limit),
+      totalPages: Math.ceil(total / limit),
     };
   }
 

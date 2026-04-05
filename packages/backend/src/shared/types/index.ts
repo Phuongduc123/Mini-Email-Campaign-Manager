@@ -24,3 +24,10 @@ export interface PaginatedResult<T> {
   limit: number;
   totalPages: number;
 }
+
+// Cursor-based paginated response wrapper
+export interface CursorPaginatedResult<T> {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
