@@ -2,6 +2,7 @@ import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { apiRouter } from './routes';
+import { trackingRouter } from './modules/tracking/tracking.routes';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { requestId } from './middleware/requestId.middleware';
 import { logger } from './config/logger';
@@ -44,6 +45,9 @@ export const createApp = (): Application => {
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
+
+  // ── Tracking (no auth — called by email clients) ──────────────────
+  app.use('/track', trackingRouter);
 
   // ── API routes ────────────────────────────────────────────────────
   app.use('/api/v1', apiRouter);
