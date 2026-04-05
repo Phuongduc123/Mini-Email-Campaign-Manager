@@ -52,7 +52,7 @@ function createRateLimiter(options: {
 
 // 5 requests per 15 minutes per IP — for /register and /login (brute-force targets)
 export const strictAuthRateLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 1 * 60 * 1000,
   max: 5,
   message: 'Too many attempts. Please try again in 15 minutes.',
 });
