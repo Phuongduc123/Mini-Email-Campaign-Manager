@@ -1,5 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { useAuthStore } from '@/store/auth.store';
+import { queryClient } from '@/lib/queryClient';
 import { AuthResponse } from '@/types/api';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
@@ -48,6 +49,7 @@ apiClient.interceptors.response.use(
       }
 
       logout();
+      queryClient.clear(); // xóa cache khi session hết hạn
       window.location.href = '/login';
     }
 
