@@ -1,5 +1,6 @@
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AxiosError } from 'axios';
+import { useQueryClient } from '@tanstack/react-query';
 import { useCampaigns } from '@/hooks/useCampaigns';
 import { StatusBadge } from '@/components/StatusBadge';
 import { CampaignListSkeleton } from '@/components/LoadingSkeleton';
@@ -10,6 +11,7 @@ import { ApiError } from '@/types/api';
 
 export default function CampaignsPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const page = Number(searchParams.get('page') ?? '1');
   const setPage = (p: number) => setSearchParams({ page: String(p) }, { replace: true });
@@ -25,6 +27,7 @@ export default function CampaignsPage() {
       }
     }
     logout();
+    queryClient.clear(); // xóa toàn bộ cache — tránh data của tài khoản cũ hiện với tài khoản mới
     navigate('/login');
   };
 
@@ -32,7 +35,15 @@ export default function CampaignsPage() {
     <div className="min-h-screen bg-gray-50">
       {/* Top nav */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-900">Campaign Manager</h1>
+        <div className="flex items-center gap-6">
+          <h1 className="text-lg font-semibold text-gray-900">Campaign Manager</h1>
+          <nav className="flex items-center gap-4 text-sm">
+            <span className="text-gray-900 font-medium">Campaigns</span>
+            <Link to="/recipients" className="text-gray-500 hover:text-gray-900 transition-colors">
+              Recipients
+            </Link>
+          </nav>
+        </div>
         <div className="flex items-center gap-4">
           <span className="text-sm text-gray-500">{user?.email}</span>
           <button

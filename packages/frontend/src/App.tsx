@@ -5,9 +5,11 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { PageSkeleton } from '@/components/LoadingSkeleton';
 
 const LoginPage          = lazy(() => import('@/pages/Login/LoginPage'));
+const RegisterPage       = lazy(() => import('@/pages/Register/RegisterPage'));
 const CampaignsPage      = lazy(() => import('@/pages/Campaigns/CampaignsPage'));
 const NewCampaignPage    = lazy(() => import('@/pages/NewCampaign/NewCampaignPage'));
 const CampaignDetailPage = lazy(() => import('@/pages/CampaignDetail/CampaignDetailPage'));
+const RecipientsPage     = lazy(() => import('@/pages/Recipients/RecipientsPage'));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -36,6 +38,14 @@ export default function App() {
           }
         />
         <Route
+          path="/register"
+          element={
+            <RedirectIfAuth>
+              <RegisterPage />
+            </RedirectIfAuth>
+          }
+        />
+        <Route
           path="/campaigns"
           element={
             <RequireAuth>
@@ -56,6 +66,14 @@ export default function App() {
           element={
             <RequireAuth>
               <CampaignDetailPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/recipients"
+          element={
+            <RequireAuth>
+              <RecipientsPage />
             </RequireAuth>
           }
         />
