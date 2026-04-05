@@ -29,7 +29,7 @@ function makeRecipient(overrides: Partial<Recipient> = {}): Recipient {
 function makeRepo(existingRecipient: Recipient | null = null): jest.Mocked<RecipientRepository> {
   const created = makeRecipient();
   return {
-    findAll: jest.fn().mockResolvedValue({ items: [created], nextCursor: null, hasMore: false }),
+    findAll: jest.fn().mockResolvedValue({ items: [created], total: 1, page: 1, limit: 20, totalPages: 1 }),
     findById: jest.fn().mockResolvedValue(created),
     findByEmail: jest.fn().mockResolvedValue(existingRecipient),
     findByIds: jest.fn().mockResolvedValue([created]),
@@ -91,27 +91,30 @@ describe('RecipientService.list()', () => {
     const repo = makeRepo(null);
     const service = new RecipientService(repo);
 
-    const query = { limit: 50 };
+    const query = { page: 1, limit: 50 };
     const result = await service.list(query);
 
     expect(repo.findAll).toHaveBeenCalledWith(query);
     expect(result.items).toHaveLength(1);
-    expect(result.hasMore).toBe(false);
+    expect(result.total).toBe(1);
   });
 
-  it('returns cursor pagination metadata from the repository', async () => {
+  it('returns offset pagination metadata from the repository', async () => {
     const repo = makeRepo(null);
     repo.findAll.mockResolvedValue({
       items: [makeRecipient({ id: 5 }), makeRecipient({ id: 4 })],
-      nextCursor: 'cursor==',
-      hasMore: true,
+      total: 45,
+      page: 3,
+      limit: 2,
+      totalPages: 23,
     });
     const service = new RecipientService(repo);
 
-    const result = await service.list({ limit: 2 });
+    const result = await service.list({ page: 3, limit: 2 });
 
-    expect(result.hasMore).toBe(true);
-    expect(result.nextCursor).toBe('cursor==');
+    expect(result.total).toBe(45);
+    expect(result.page).toBe(3);
+    expect(result.totalPages).toBe(23);
     expect(result.items).toHaveLength(2);
   });
 });
