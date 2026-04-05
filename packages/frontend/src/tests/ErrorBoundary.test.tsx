@@ -15,7 +15,7 @@ function Bomb({ shouldThrow }: { shouldThrow: boolean }) {
 }
 
 // A component that throws a non-Error value
-function NonErrorThrower() {
+function NonErrorThrower(): never {
   throw 'just a string error';
 }
 

@@ -38,7 +38,6 @@ function makeQueryClient() {
       queries: { retry: false },
       mutations: { retry: false },
     },
-    logger: { log: () => {}, warn: () => {}, error: () => {} },
   });
 }
 
