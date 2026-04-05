@@ -30,6 +30,16 @@ import { connectDatabase } from '../config/database';
 
 const BATCH_SIZE = 200;
 const FAILURE_RATE = 0.2;
+// Simulated open rate: ~35% of successfully sent emails will be "opened"
+const OPEN_RATE = 0.35;
+
+/**
+ * Builds the tracking pixel <img> tag that would be embedded in the real email HTML.
+ * When an email client loads this image, it hits GET /track/open and records openedAt.
+ */
+function buildTrackingPixelUrl(baseUrl: string, campaignId: number, recipientId: number): string {
+  return `${baseUrl}/track/open?c=${campaignId}&r=${recipientId}`;
+}
 
 async function processCampaignSend(job: Job<CampaignSendJobData>): Promise<void> {
   const { campaignId } = job.data;
@@ -37,7 +47,11 @@ async function processCampaignSend(job: Job<CampaignSendJobData>): Promise<void>
   let totalSent = 0;
   let totalFailed = 0;
 
+  const baseUrl = process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`;
+
   logger.info({ event: 'worker.send.started', campaignId, jobId: job.id }, 'Worker processing campaign send');
+
+  const campaign = await Campaign.findByPk(campaignId);
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -74,9 +88,36 @@ async function processCampaignSend(job: Job<CampaignSendJobData>): Promise<void>
         { status: 'sent', sentAt: now },
         { where: { campaignId, recipientId: { [Op.in]: sentIds } } },
       );
-      // Atomically increment denormalized counter
       await Campaign.increment({ sentCount: sentIds.length }, { where: { id: campaignId } });
       totalSent += sentIds.length;
+
+      // Log what the real email body would look like (with tracking pixel embedded)
+      for (const recipientId of sentIds) {
+        const pixelUrl = buildTrackingPixelUrl(baseUrl, campaignId, recipientId);
+        logger.debug(
+          { event: 'worker.send.email', campaignId, recipientId, pixelUrl },
+          `[SIMULATED EMAIL] Subject: ${campaign?.subject ?? ''} | Pixel: <img src="${pixelUrl}" width="1" height="1" />`,
+        );
+      }
+
+      // Simulate email opens: ~OPEN_RATE of sent recipients "open" the email
+      const openedIds = sentIds.filter(() => Math.random() < OPEN_RATE);
+      if (openedIds.length > 0) {
+        await CampaignRecipient.update(
+          { openedAt: new Date() },
+          {
+            where: {
+              campaignId,
+              recipientId: { [Op.in]: openedIds },
+              openedAt: null, // idempotent
+            },
+          },
+        );
+        logger.debug(
+          { event: 'worker.send.opens_simulated', campaignId, count: openedIds.length },
+          'Simulated email opens (tracking pixel would trigger this in production)',
+        );
+      }
     }
 
     if (failedIds.length > 0) {
